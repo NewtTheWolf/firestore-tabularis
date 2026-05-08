@@ -14,6 +14,7 @@
     "file_based": false,
     "folder_based": false,
     "no_connection_required": true,
+    "connection_string": false,
     "identifier_quote": "\"",
     "alter_primary_key": false,
     "alter_column": false,
