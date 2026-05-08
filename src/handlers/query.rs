@@ -328,7 +328,7 @@ fn serialize_row(
     let id = doc_short_id(doc);
     let mut row: Vec<Value> = Vec::with_capacity(columns.len());
     for col in columns {
-        if col.name == "__id__" {
+        if col.name == crate::schema_infer::ID_COLUMN {
             row.push(Value::String(id.clone()));
             continue;
         }

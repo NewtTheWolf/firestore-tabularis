@@ -62,7 +62,7 @@ pub enum Literal {
     Timestamp(chrono::DateTime<chrono::Utc>),
     /// Full Firestore document resource path
     /// (`projects/<p>/databases/<d>/documents/<col>/<doc>[/<sub>/<doc>]*`).
-    /// Produced by the `__id__` → `__name__` rewrite in `execute_query`; not
+    /// Produced by the doc-ID → `__name__` rewrite in `execute_query`; not
     /// reachable via SQL syntax directly.
     Reference(String),
 }

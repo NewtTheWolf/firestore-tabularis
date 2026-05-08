@@ -40,6 +40,11 @@ pub struct ColumnInfo {
     pub references: Option<String>,
 }
 
+/// Name of the synthetic primary-key column we expose for every collection,
+/// carrying the Firestore document ID. If a real document field has the same
+/// name, the synthetic column wins and the real field is hidden.
+pub const ID_COLUMN: &str = "id";
+
 impl ColumnInfo {
     pub fn to_json(&self) -> Value {
         // Field names match the working tabularis-google-sheets-plugin reference
@@ -51,10 +56,10 @@ impl ColumnInfo {
             "data_type": self.data_type,
             "is_nullable": self.is_nullable,
             "default_value": Value::Null,
-            "is_pk": self.name == "__id__",
+            "is_pk": self.name == ID_COLUMN,
             "is_auto_increment": false,
             "character_maximum_length": Value::Null,
-            "comment": if self.name == "__id__" { Value::String("Firestore document ID".into()) } else { Value::Null },
+            "comment": if self.name == ID_COLUMN { Value::String("Firestore document ID".into()) } else { Value::Null },
             "references": self.references.as_ref().map(|s| Value::String(s.clone())).unwrap_or(Value::Null),
         })
     }
@@ -63,7 +68,7 @@ impl ColumnInfo {
 pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec<ColumnInfo> {
     // Always-present synthetic ID column.
     let mut out = vec![ColumnInfo {
-        name: "__id__".into(),
+        name: ID_COLUMN.into(),
         data_type: "string".into(),
         is_nullable: false,
         references: None,
@@ -93,6 +98,9 @@ pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec
     }
 
     for (name, types) in types_by_field {
+        if name == ID_COLUMN {
+            continue;
+        }
         let (data_type, has_null) = classify_set(&types);
         let missing = seen_count.get(&name).is_none_or(|&c| c < total);
         let is_nullable = has_null || missing;
@@ -216,7 +224,7 @@ mod tests {
     fn empty_sample_returns_only_id_column() {
         let cols = infer(&[], &[]);
         assert_eq!(cols.len(), 1);
-        assert_eq!(cols[0].name, "__id__");
+        assert_eq!(cols[0].name, ID_COLUMN);
         assert_eq!(cols[0].data_type, "string");
         assert!(!cols[0].is_nullable);
     }
@@ -230,7 +238,7 @@ mod tests {
         let cols = infer(&sample, &[]);
         assert_eq!(
             cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-            vec!["__id__", "age", "name"]
+            vec!["id", "age", "name"]
         );
         assert_eq!(cols[1].data_type, "number");
         assert_eq!(cols[2].data_type, "string");

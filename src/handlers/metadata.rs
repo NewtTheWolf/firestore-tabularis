@@ -220,7 +220,7 @@ pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
                     json!({
                         "from_column": c.name.clone(),
                         "to_table": target.clone(),
-                        "to_column": "__id__"
+                        "to_column": crate::schema_infer::ID_COLUMN
                     })
                 })
             })

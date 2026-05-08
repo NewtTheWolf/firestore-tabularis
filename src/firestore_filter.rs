@@ -102,14 +102,11 @@ fn walk(expr: &FilterExpr, state: &mut ValidationState) {
     }
 }
 
-/// Rewrite `__id__` field paths to `__name__` with full document resource paths.
-///
-/// Why: Firestore rejects `__id__` as a field name ("Invalid reserved name in
-/// field path"). The wire-level identifier for filtering by document ID is
-/// `__name__`, carrying a Reference to the full doc path. We expose `__id__` as
-/// the synthetic primary-key column, so users naturally write
-/// `WHERE __id__ = 'foo'`; this pass translates that into the form the server
-/// accepts. Range / IN queries on the doc ID translate the same way.
+/// Rewrite the synthetic doc-ID column (`id`) to Firestore's wire-level
+/// `__name__` field, with the literal value wrapped as a full document
+/// resource path. Firestore rejects any user-provided field path beginning
+/// with `__`, so we cannot pass the synthetic column through unchanged.
+/// Range / IN queries on the doc ID translate the same way.
 pub fn rewrite_doc_id(expr: &mut FilterExpr, table: &str, project: &str, database: &str) {
     let prefix = format!("projects/{project}/databases/{database}/documents/{table}/");
     rewrite_walk(expr, &prefix);
@@ -137,7 +134,7 @@ fn rewrite_walk(expr: &mut FilterExpr, prefix: &str) {
 }
 
 fn is_doc_id(field: &[String]) -> bool {
-    field.len() == 1 && field[0] == "__id__"
+    field.len() == 1 && field[0] == crate::schema_infer::ID_COLUMN
 }
 
 fn promote_to_reference(lit: &mut Literal, prefix: &str) {
@@ -335,7 +332,7 @@ mod tests {
     #[test]
     fn rewrite_doc_id_translates_eq_to_name_with_full_path() {
         let mut expr = FilterExpr::Compare {
-            field: vec!["__id__".to_string()],
+            field: vec!["id".to_string()],
             op: CmpOp::Eq,
             value: Literal::Str("callservice".to_string()),
         };
@@ -358,7 +355,7 @@ mod tests {
     #[test]
     fn rewrite_doc_id_recurses_into_and() {
         let mut expr = FilterExpr::And(vec![
-            cmp(&["__id__"], CmpOp::Eq, Literal::Str("a".into())),
+            cmp(&["id"], CmpOp::Eq, Literal::Str("a".into())),
             cmp(&["status"], CmpOp::Eq, Literal::Str("active".into())),
         ]);
         rewrite_doc_id(&mut expr, "users", "p1", "(default)");
@@ -386,7 +383,7 @@ mod tests {
     #[test]
     fn rewrite_doc_id_translates_in_list() {
         let mut expr = FilterExpr::In {
-            field: vec!["__id__".to_string()],
+            field: vec!["id".to_string()],
             values: vec![Literal::Str("a".into()), Literal::Str("b".into())],
             negated: false,
         };
