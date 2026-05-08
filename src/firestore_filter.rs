@@ -102,6 +102,51 @@ fn walk(expr: &FilterExpr, state: &mut ValidationState) {
     }
 }
 
+/// Rewrite `__id__` field paths to `__name__` with full document resource paths.
+///
+/// Why: Firestore rejects `__id__` as a field name ("Invalid reserved name in
+/// field path"). The wire-level identifier for filtering by document ID is
+/// `__name__`, carrying a Reference to the full doc path. We expose `__id__` as
+/// the synthetic primary-key column, so users naturally write
+/// `WHERE __id__ = 'foo'`; this pass translates that into the form the server
+/// accepts. Range / IN queries on the doc ID translate the same way.
+pub fn rewrite_doc_id(expr: &mut FilterExpr, table: &str, project: &str, database: &str) {
+    let prefix = format!("projects/{project}/databases/{database}/documents/{table}/");
+    rewrite_walk(expr, &prefix);
+}
+
+fn rewrite_walk(expr: &mut FilterExpr, prefix: &str) {
+    match expr {
+        FilterExpr::Compare { field, value, .. } if is_doc_id(field) => {
+            *field = vec!["__name__".to_string()];
+            promote_to_reference(value, prefix);
+        }
+        FilterExpr::In { field, values, .. } if is_doc_id(field) => {
+            *field = vec!["__name__".to_string()];
+            for v in values {
+                promote_to_reference(v, prefix);
+            }
+        }
+        FilterExpr::And(children) | FilterExpr::Or(children) => {
+            for c in children {
+                rewrite_walk(c, prefix);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_doc_id(field: &[String]) -> bool {
+    field.len() == 1 && field[0] == "__id__"
+}
+
+fn promote_to_reference(lit: &mut Literal, prefix: &str) {
+    if let Literal::Str(s) = lit {
+        let path = format!("{prefix}{s}");
+        *lit = Literal::Reference(path);
+    }
+}
+
 /// Convert a Phase-2 `FilterExpr` AST into the firestore-rs filter type.
 /// Pre-flight validation should have run already; this function trusts the input.
 pub fn build_filter(expr: &FilterExpr) -> FirestoreQueryFilter {
@@ -174,6 +219,7 @@ fn literal_to_firestore_value(lit: &Literal) -> FirestoreValue {
             seconds: dt.timestamp(),
             nanos: dt.timestamp_subsec_nanos() as i32,
         }),
+        Literal::Reference(path) => V::ReferenceValue(path.clone()),
     };
     FirestoreValue::from(PV {
         value_type: Some(value_type),
@@ -284,5 +330,83 @@ mod tests {
         ]);
         let err = validate(&expr).unwrap_err();
         assert!(err.contains("inequality"));
+    }
+
+    #[test]
+    fn rewrite_doc_id_translates_eq_to_name_with_full_path() {
+        let mut expr = FilterExpr::Compare {
+            field: vec!["__id__".to_string()],
+            op: CmpOp::Eq,
+            value: Literal::Str("callservice".to_string()),
+        };
+        rewrite_doc_id(&mut expr, "_config", "luninora", "(default)");
+        match expr {
+            FilterExpr::Compare { field, value, .. } => {
+                assert_eq!(field, vec!["__name__".to_string()]);
+                assert_eq!(
+                    value,
+                    Literal::Reference(
+                        "projects/luninora/databases/(default)/documents/_config/callservice"
+                            .to_string()
+                    )
+                );
+            }
+            _ => panic!("expected Compare, got {expr:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_doc_id_recurses_into_and() {
+        let mut expr = FilterExpr::And(vec![
+            cmp(&["__id__"], CmpOp::Eq, Literal::Str("a".into())),
+            cmp(&["status"], CmpOp::Eq, Literal::Str("active".into())),
+        ]);
+        rewrite_doc_id(&mut expr, "users", "p1", "(default)");
+        match expr {
+            FilterExpr::And(terms) => {
+                match &terms[0] {
+                    FilterExpr::Compare { field, value, .. } => {
+                        assert_eq!(field, &vec!["__name__".to_string()]);
+                        assert!(matches!(value, Literal::Reference(_)));
+                    }
+                    other => panic!("expected rewritten Compare, got {other:?}"),
+                }
+                match &terms[1] {
+                    FilterExpr::Compare { field, value, .. } => {
+                        assert_eq!(field, &vec!["status".to_string()]);
+                        assert_eq!(value, &Literal::Str("active".into()));
+                    }
+                    other => panic!("expected untouched Compare, got {other:?}"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn rewrite_doc_id_translates_in_list() {
+        let mut expr = FilterExpr::In {
+            field: vec!["__id__".to_string()],
+            values: vec![Literal::Str("a".into()), Literal::Str("b".into())],
+            negated: false,
+        };
+        rewrite_doc_id(&mut expr, "users", "p1", "(default)");
+        match expr {
+            FilterExpr::In { field, values, .. } => {
+                assert_eq!(field, vec!["__name__".to_string()]);
+                assert_eq!(values.len(), 2);
+                assert!(matches!(values[0], Literal::Reference(_)));
+                assert!(matches!(values[1], Literal::Reference(_)));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn rewrite_doc_id_leaves_other_fields_alone() {
+        let mut expr = cmp(&["status"], CmpOp::Eq, Literal::Str("active".into()));
+        let before = expr.clone();
+        rewrite_doc_id(&mut expr, "users", "p1", "(default)");
+        assert_eq!(expr, before);
     }
 }

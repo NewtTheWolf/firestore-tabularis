@@ -71,10 +71,20 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let parsed = match crate::query_parser::parse(&sql) {
+    let mut parsed = match crate::query_parser::parse(&sql) {
         Ok(p) => p,
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
+
+    if let (Some(filter), Some(settings)) = (parsed.where_clause.as_mut(), crate::state::settings())
+    {
+        crate::firestore_filter::rewrite_doc_id(
+            filter,
+            &parsed.table,
+            &settings.project_id,
+            &settings.database_id,
+        );
+    }
 
     // Pre-flight Firestore restriction validation (before any I/O).
     if let Some(filter) = &parsed.where_clause {
@@ -397,7 +407,7 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let parsed = match crate::query_parser::parse(&sql) {
+    let mut parsed = match crate::query_parser::parse(&sql) {
         Ok(p) => p,
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
@@ -406,6 +416,16 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         Ok(db) => db,
         Err(resp) => return resp,
     };
+
+    if let (Some(filter), Some(settings)) = (parsed.where_clause.as_mut(), crate::state::settings())
+    {
+        crate::firestore_filter::rewrite_doc_id(
+            filter,
+            &parsed.table,
+            &settings.project_id,
+            &settings.database_id,
+        );
+    }
 
     if let Some(filter) = &parsed.where_clause {
         if let Err(msg) = crate::firestore_filter::validate(filter) {
@@ -607,6 +627,7 @@ pub(crate) fn canonical_literal(lit: &crate::query_parser::Literal) -> String {
         L::Bool(b) => b.to_string(),
         L::Null => "null".to_string(),
         L::Timestamp(dt) => format!("ts:{}", dt.to_rfc3339()),
+        L::Reference(p) => format!("ref:{p}"),
     }
 }
 
