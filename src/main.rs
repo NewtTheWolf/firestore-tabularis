@@ -2,9 +2,11 @@
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod cache;
 mod client;
 mod error;
 mod firestore_error;
+mod firestore_filter;
 mod handlers;
 mod models;
 mod query_parser;

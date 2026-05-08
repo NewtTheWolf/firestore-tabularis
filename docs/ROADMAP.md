@@ -7,14 +7,16 @@ This file tracks the planned evolution of the firestore Tabularis plugin. Phase 
 | Phase | Status | Spec |
 |---|---|---|
 | 1 — Read-only MVP | ✅ shipped 2026-05-08 | [`specs/2026-05-08-phase-1-firestore-read-only-driver-design.md`](specs/2026-05-08-phase-1-firestore-read-only-driver-design.md) |
-| 2 — Query layer + Map polish | not started | TBD |
+| 2 — Query layer + Map polish | ✅ shipped 2026-05-08 | [`specs/2026-05-08-phase-2-firestore-query-layer-design.md`](specs/2026-05-08-phase-2-firestore-query-layer-design.md) |
 | 3 — CRUD | not started | TBD |
 | 4 — Multi-DB + Subcollections + Auth UX | not started | TBD |
 | 5 — Release & distribution | not started | TBD |
 
 ---
 
-## Phase 2 — Query layer + Map polish
+## Phase 2 — Query layer + Map polish ✅ shipped 2026-05-08
+
+Shipped: full WHERE/AND/OR/NOT IN/parens grammar, six comparison ops, IN, ARRAY_CONTAINS / ARRAY_CONTAINS_ANY, TIMESTAMP literals, parallel COUNT aggregation with TTL cache for `total_count`, cursor-based pagination via CURSOR_CACHE with OFFSET fallback, native JSON for Map and Array cell values, ER-diagram via inferred reference foreign keys, four new structured error mappings (PERMISSION_DENIED / RESOURCE_EXHAUSTED / DEADLINE_EXCEEDED / UNAVAILABLE), and `explain_query` returning the Firestore query plan. Native-JSON-for-maps decision: kept (no revert needed; smoke test against Tabularis pending).
 
 The biggest UX hebel after Phase 1. Turns the plugin from "data browser" into "daily driver".
 

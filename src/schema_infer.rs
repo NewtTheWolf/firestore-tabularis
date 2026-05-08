@@ -28,11 +28,16 @@ pub enum FieldType {
 /// we use it to fold across all sample docs in `infer`.)
 pub type DocumentTypes = BTreeMap<String, FieldType>;
 
+/// Per-document, the optional reference target collection for any Reference-typed field.
+/// Only populated for fields where classify_value() returned Reference.
+pub type DocumentReferences = BTreeMap<String, String>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
     pub is_nullable: bool,
+    pub references: Option<String>,
 }
 
 impl ColumnInfo {
@@ -50,20 +55,23 @@ impl ColumnInfo {
             "is_auto_increment": false,
             "character_maximum_length": Value::Null,
             "comment": if self.name == "__id__" { Value::String("Firestore document ID".into()) } else { Value::Null },
+            "references": self.references.as_ref().map(|s| Value::String(s.clone())).unwrap_or(Value::Null),
         })
     }
 }
 
-pub fn infer(sample: &[DocumentTypes]) -> Vec<ColumnInfo> {
+pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec<ColumnInfo> {
     // Always-present synthetic ID column.
     let mut out = vec![ColumnInfo {
         name: "__id__".into(),
         data_type: "string".into(),
         is_nullable: false,
+        references: None,
     }];
 
     // Collect, per field, the set of observed types.
     let mut types_by_field: BTreeMap<String, BTreeSet<FieldType>> = BTreeMap::new();
+    let mut reference_targets_by_field: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     let total = sample.len();
     let mut seen_count: BTreeMap<String, usize> = BTreeMap::new();
@@ -75,14 +83,31 @@ pub fn infer(sample: &[DocumentTypes]) -> Vec<ColumnInfo> {
         }
     }
 
+    for refs in references {
+        for (k, target) in refs {
+            reference_targets_by_field
+                .entry(k.clone())
+                .or_default()
+                .insert(target.clone());
+        }
+    }
+
     for (name, types) in types_by_field {
         let (data_type, has_null) = classify_set(&types);
         let missing = seen_count.get(&name).is_none_or(|&c| c < total);
         let is_nullable = has_null || missing;
+        let references = reference_targets_by_field.get(&name).and_then(|targets| {
+            if targets.len() == 1 {
+                targets.iter().next().cloned()
+            } else {
+                None
+            }
+        });
         out.push(ColumnInfo {
             name,
             data_type,
             is_nullable,
+            references,
         });
     }
 
@@ -149,6 +174,29 @@ pub fn types_from_document(doc: &firestore::FirestoreDocument) -> DocumentTypes 
         .collect()
 }
 
+/// Walk one document and extract reference targets for any Reference-typed field.
+/// The target is the collection segment immediately after `documents/` in the
+/// reference's resource path.
+pub fn references_from_document(doc: &firestore::FirestoreDocument) -> DocumentReferences {
+    use gcloud_sdk::google::firestore::v1::value::ValueType as V;
+    let mut out = DocumentReferences::new();
+    for (name, val) in &doc.fields {
+        if let Some(V::ReferenceValue(path)) = val.value_type.as_ref() {
+            if let Some(target) = extract_target_collection(path) {
+                out.insert(name.clone(), target);
+            }
+        }
+    }
+    out
+}
+
+fn extract_target_collection(resource_path: &str) -> Option<String> {
+    // Find "documents/" then take the segment immediately after.
+    let idx = resource_path.find("/documents/")?;
+    let after = &resource_path[idx + "/documents/".len()..];
+    after.split('/').next().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,9 +205,16 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 
+    fn refs(pairs: &[(&str, &str)]) -> DocumentReferences {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
     #[test]
     fn empty_sample_returns_only_id_column() {
-        let cols = infer(&[]);
+        let cols = infer(&[], &[]);
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "__id__");
         assert_eq!(cols[0].data_type, "string");
@@ -172,7 +227,7 @@ mod tests {
             ("name", FieldType::String),
             ("age", FieldType::Integer),
         ])];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         assert_eq!(
             cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["__id__", "age", "name"]
@@ -188,7 +243,7 @@ mod tests {
             doc(&[("score", FieldType::Integer)]),
             doc(&[("score", FieldType::Double)]),
         ];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         let score = cols.iter().find(|c| c.name == "score").unwrap();
         assert_eq!(score.data_type, "number");
     }
@@ -199,7 +254,7 @@ mod tests {
             doc(&[("note", FieldType::String)]),
             doc(&[("note", FieldType::Null)]),
         ];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         let note = cols.iter().find(|c| c.name == "note").unwrap();
         assert_eq!(note.data_type, "string");
         assert!(note.is_nullable);
@@ -211,7 +266,7 @@ mod tests {
             doc(&[("flag", FieldType::Boolean)]),
             doc(&[("flag", FieldType::String)]),
         ];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         let flag = cols.iter().find(|c| c.name == "flag").unwrap();
         assert_eq!(flag.data_type, "mixed");
     }
@@ -222,7 +277,7 @@ mod tests {
             doc(&[("name", FieldType::String), ("nickname", FieldType::String)]),
             doc(&[("name", FieldType::String)]),
         ];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         let name = cols.iter().find(|c| c.name == "name").unwrap();
         let nickname = cols.iter().find(|c| c.name == "nickname").unwrap();
         assert!(!name.is_nullable);
@@ -232,7 +287,7 @@ mod tests {
     #[test]
     fn all_null_yields_null_data_type() {
         let sample = vec![doc(&[("placeholder", FieldType::Null)])];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         let p = cols.iter().find(|c| c.name == "placeholder").unwrap();
         assert_eq!(p.data_type, "null");
         assert!(p.is_nullable);
@@ -241,19 +296,74 @@ mod tests {
     #[test]
     fn nested_map_column_typed_as_map() {
         let sample = vec![doc(&[("address", FieldType::Map)])];
-        let cols = infer(&sample);
+        let cols = infer(&sample, &[]);
         let a = cols.iter().find(|c| c.name == "address").unwrap();
         assert_eq!(a.data_type, "map");
     }
 
     #[test]
     fn id_column_serialises_as_primary_key() {
-        let cols = infer(&[]);
+        let cols = infer(&[], &[]);
         let json = cols[0].to_json();
         assert_eq!(json["is_pk"], serde_json::Value::Bool(true));
         assert_eq!(
             json["comment"],
             serde_json::Value::String("Firestore document ID".into())
         );
+    }
+
+    #[test]
+    fn reference_value_extracts_target_collection() {
+        let sample = vec![doc(&[("author", FieldType::Reference)])];
+        let refs_data = vec![refs(&[("author", "users")])];
+        let cols = infer(&sample, &refs_data);
+        let author = cols.iter().find(|c| c.name == "author").unwrap();
+        assert_eq!(author.data_type, "reference");
+        assert_eq!(author.references, Some("users".to_string()));
+    }
+
+    #[test]
+    fn mixed_reference_targets_yield_no_fk() {
+        let sample = vec![
+            doc(&[("ref_field", FieldType::Reference)]),
+            doc(&[("ref_field", FieldType::Reference)]),
+        ];
+        let refs_data = vec![
+            refs(&[("ref_field", "users")]),
+            refs(&[("ref_field", "advisors")]),
+        ];
+        let cols = infer(&sample, &refs_data);
+        let f = cols.iter().find(|c| c.name == "ref_field").unwrap();
+        assert_eq!(f.references, None);
+    }
+
+    #[test]
+    fn no_reference_data_yields_no_fk() {
+        let sample = vec![doc(&[("author", FieldType::Reference)])];
+        let cols = infer(&sample, &[]);
+        let f = cols.iter().find(|c| c.name == "author").unwrap();
+        assert_eq!(f.references, None);
+    }
+}
+
+#[cfg(test)]
+mod resource_path_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_root_collection() {
+        let path = "projects/p/databases/(default)/documents/users/abc123";
+        assert_eq!(extract_target_collection(path), Some("users".to_string()));
+    }
+
+    #[test]
+    fn handles_subcollection_doc() {
+        let path = "projects/p/databases/(default)/documents/users/abc/orders/xyz";
+        assert_eq!(extract_target_collection(path), Some("users".to_string()));
+    }
+
+    #[test]
+    fn returns_none_for_unrecognised_path() {
+        assert_eq!(extract_target_collection("garbage"), None);
     }
 }

@@ -13,6 +13,10 @@ pub enum ErrorKind {
     FailedPrecondition,
     Unauthenticated,
     NotFound,
+    PermissionDenied,
+    ResourceExhausted,
+    DeadlineExceeded,
+    Unavailable,
     Other,
 }
 
@@ -44,6 +48,50 @@ pub fn map_message(raw: &str, kind: ErrorKind) -> (i64, String, Option<Value>) {
     if kind == ErrorKind::NotFound {
         return (-32602, format!("Not found: {raw}"), None);
     }
+    if kind == ErrorKind::PermissionDenied {
+        let project = crate::state::settings()
+            .map(|s| s.project_id.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("the configured project");
+        return (
+            -32602,
+            format!(
+                "Access denied: {raw}. Check the service account's IAM roles for project '{project}' \
+                 (needs at minimum 'roles/datastore.viewer' for reads)."
+            ),
+            None,
+        );
+    }
+    if kind == ErrorKind::ResourceExhausted {
+        return (
+            -32603,
+            format!(
+                "Firestore quota exceeded: {raw}. Wait a minute and retry. \
+                 If this persists, check the GCP Quotas page for your project."
+            ),
+            None,
+        );
+    }
+    if kind == ErrorKind::DeadlineExceeded {
+        return (
+            -32603,
+            format!(
+                "Request timed out: {raw}. The query may be missing an index or scanning a very \
+                 large collection — try LIMIT to narrow the result set."
+            ),
+            None,
+        );
+    }
+    if kind == ErrorKind::Unavailable {
+        return (
+            -32603,
+            format!(
+                "Firestore temporarily unavailable: {raw}. \
+                 This is usually transient — retry in a few seconds."
+            ),
+            None,
+        );
+    }
     (-32603, format!("Firestore: {raw}"), None)
 }
 
@@ -63,8 +111,16 @@ fn classify(raw: &str) -> ErrorKind {
         ErrorKind::FailedPrecondition
     } else if raw.contains("UNAUTHENTICATED") {
         ErrorKind::Unauthenticated
+    } else if raw.contains("PERMISSION_DENIED") {
+        ErrorKind::PermissionDenied
     } else if raw.contains("NOT_FOUND") {
         ErrorKind::NotFound
+    } else if raw.contains("RESOURCE_EXHAUSTED") {
+        ErrorKind::ResourceExhausted
+    } else if raw.contains("DEADLINE_EXCEEDED") {
+        ErrorKind::DeadlineExceeded
+    } else if raw.contains("UNAVAILABLE") {
+        ErrorKind::Unavailable
     } else {
         ErrorKind::Other
     }
@@ -160,5 +216,57 @@ mod tests {
         );
         assert_eq!(classify("rpc error: code = NOT_FOUND"), ErrorKind::NotFound);
         assert_eq!(classify("rpc error: code = INTERNAL"), ErrorKind::Other);
+    }
+
+    #[test]
+    fn permission_denied_message_includes_project_id_and_role_hint() {
+        let (code, msg, _) = map_message(
+            "PERMISSION_DENIED: missing scope",
+            ErrorKind::PermissionDenied,
+        );
+        assert_eq!(code, -32602);
+        assert!(msg.contains("Access denied"));
+        assert!(msg.contains("roles/datastore.viewer"));
+    }
+
+    #[test]
+    fn resource_exhausted_message_mentions_quota() {
+        let (code, msg, _) = map_message("RESOURCE_EXHAUSTED: quota", ErrorKind::ResourceExhausted);
+        assert_eq!(code, -32603);
+        assert!(msg.contains("quota exceeded"));
+    }
+
+    #[test]
+    fn deadline_exceeded_message_suggests_limit() {
+        let (code, msg, _) = map_message("DEADLINE_EXCEEDED", ErrorKind::DeadlineExceeded);
+        assert_eq!(code, -32603);
+        assert!(msg.contains("LIMIT"));
+    }
+
+    #[test]
+    fn unavailable_message_says_transient() {
+        let (code, msg, _) = map_message("UNAVAILABLE: temp", ErrorKind::Unavailable);
+        assert_eq!(code, -32603);
+        assert!(msg.contains("transient"));
+    }
+
+    #[test]
+    fn classifier_recognises_new_status_tokens() {
+        assert_eq!(
+            classify("rpc error: code = PERMISSION_DENIED"),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            classify("rpc error: code = RESOURCE_EXHAUSTED"),
+            ErrorKind::ResourceExhausted
+        );
+        assert_eq!(
+            classify("rpc error: code = DEADLINE_EXCEEDED"),
+            ErrorKind::DeadlineExceeded
+        );
+        assert_eq!(
+            classify("rpc error: code = UNAVAILABLE"),
+            ErrorKind::Unavailable
+        );
     }
 }

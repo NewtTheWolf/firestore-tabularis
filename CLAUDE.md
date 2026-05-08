@@ -6,22 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Tabularis driver plugin targeting **Google Cloud Firestore**. The plugin is a standalone Rust binary (`firestore-plugin`) that Tabularis spawns as a child process and talks to over **JSON-RPC 2.0 on stdio** (one request per line on stdin, one response per line on stdout, stderr free for logging). The same process is reused for the entire connection session.
 
-**Phase 1 is implemented.** The dispatch loop is async (`#[tokio::main(flavor = "multi_thread")]`). The following methods are fully wired:
+**Phases 1 and 2 are implemented.** The dispatch loop is async (`#[tokio::main(flavor = "multi_thread")]`). The following methods are fully wired:
 
 - `initialize` — stores `Settings` (project ID, database ID, service-account path, emulator host, sample size) in the global `SETTINGS` cell
 - `test_connection` — builds `FirestoreDb` via `client::build`, pings the root collection list
 - `ping` — fast-path returning `Null` directly in `rpc.rs` (no Firestore round-trip)
 - `get_databases` — returns `[database_id]` from settings
 - `get_tables` — lists root Firestore collections sorted alphabetically
-- `get_columns` — samples up to `sample_size` documents per collection, infers types via `schema_infer`, caches results in `SCHEMA_CACHE`
-- `execute_query` — parses a `SELECT * FROM "<collection>" [ORDER BY …] [LIMIT n] [OFFSET n]` subset via `query_parser`, runs the Firestore query, returns `{ columns, rows, total_count, execution_time_ms }`
+- `get_columns` — samples up to `sample_size` documents per collection, infers types + reference targets via `schema_infer`, caches results in `SCHEMA_CACHE`
+- `execute_query` — parses the full Phase-2 SQL subset (WHERE with AND/OR/NOT IN/parens, ARRAY_CONTAINS / ARRAY_CONTAINS_ANY, IN, six comparison operators, ORDER BY, LIMIT, OFFSET, host `page`/`page_size` params); runs filter + aggregation in parallel; cursor-based pagination via CURSOR_CACHE with OFFSET fallback; returns `{ columns, rows, total_count, execution_time_ms }`. Map/Array values render as native JSON (objects/arrays), not stringified.
+- `get_schema_snapshot` — parallel-fetches every root collection, infers columns + foreign-key relationships from `referenceValue` fields, returns the ER-diagram envelope `{ tables, columns, foreign_keys }`
+- `explain_query` — runs the Firestore EXPLAIN/ANALYZE stream and forwards `documents_returned`, `documents_scanned`, `index_used`, `execution_duration_ms`
 
 Pure-logic modules (no Firestore I/O, fully unit-tested):
-- `query_parser` — hand-rolled SQL tokeniser/parser for the Phase 1 SELECT subset
-- `schema_infer` — sample-based field-type inference (maps Firestore proto types → `string/number/boolean/timestamp/…/mixed`)
-- `firestore_error` — gRPC status classifier with missing-index URL extraction
+- `query_parser` — hand-rolled tokeniser + recursive-descent parser for the Phase-2 SELECT subset (boolean tree AST, multi-char ops, string literals with escapes, parens, TIMESTAMP literals)
+- `firestore_filter` — pre-flight validation (Firestore compound-filter restrictions: ≤1 inequality field, ≤30 IN values, no ARRAY_CONTAINS + ARRAY_CONTAINS_ANY mix) + `build_filter` mapper to firestore-rs `FirestoreQueryFilter`
+- `cache` — generic TTL+LRU `TtlLruCache<K, V>` backing the cursor and count caches in `state`
+- `schema_infer` — sample-based field-type inference (maps Firestore proto types → `string/number/boolean/timestamp/reference/array/map/…/mixed`) plus reference-target extraction (`projects/.../documents/<collection>/<doc>` → `<collection>`)
+- `firestore_error` — gRPC status classifier with missing-index URL extraction; eight `ErrorKind` variants including `PermissionDenied` (IAM-role hint with project ID), `ResourceExhausted` (quota hint), `DeadlineExceeded` (LIMIT hint), `Unavailable` (transient-retry hint)
 
-Phase 2/3/4 handlers (`insert_record`, `update_record`, `delete_record`, DDL generators, complex WHERE/JOIN queries, subcollections) still return JSON-RPC `-32601 method not implemented`.
+Phase 3/4 handlers (`insert_record`, `update_record`, `delete_record`, DDL generators, subcollections) still return JSON-RPC `-32601 method not implemented`.
 
 Naming convention used in this repo:
 - Cargo crate / binary: `firestore-plugin` (deliberately suffixed to avoid shadowing the `firestore` crate from crates.io that we'll likely depend on)

@@ -105,8 +105,12 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
         .iter()
         .map(crate::schema_infer::types_from_document)
         .collect();
+    let refs: Vec<crate::schema_infer::DocumentReferences> = docs
+        .iter()
+        .map(crate::schema_infer::references_from_document)
+        .collect();
 
-    let columns = crate::schema_infer::infer(&sample);
+    let columns = crate::schema_infer::infer(&sample, &refs);
     crate::state::SCHEMA_CACHE
         .write()
         .unwrap()
@@ -141,10 +145,100 @@ pub fn get_routine_definition(id: Value, _params: &Value) -> Value {
     ok_response(id, Value::String(String::new()))
 }
 
-pub fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
+pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
+    let db = match resolve_client(id.clone()).await {
+        Ok(db) => db,
+        Err(resp) => return resp,
+    };
+
+    // List all root collections.
+    let stream = match db
+        .fluent()
+        .list()
+        .collections()
+        .stream_all_with_errors()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return error_from(id, &e),
+    };
+
+    let table_names: Vec<String> = match stream.try_collect().await {
+        Ok(v) => v,
+        Err(e) => return error_from(id, &e),
+    };
+
+    let n = crate::state::settings()
+        .map(|s| s.sample_size)
+        .unwrap_or(50);
+
+    // Parallel fetch for every collection.
+    let fetches = table_names.iter().cloned().map(|table| {
+        let db = db.clone();
+        async move {
+            let docs: Vec<firestore::FirestoreDocument> = db
+                .fluent()
+                .select()
+                .from(table.as_str())
+                .limit(n)
+                .query()
+                .await
+                .unwrap_or_default();
+            let types: Vec<crate::schema_infer::DocumentTypes> = docs
+                .iter()
+                .map(crate::schema_infer::types_from_document)
+                .collect();
+            let refs: Vec<crate::schema_infer::DocumentReferences> = docs
+                .iter()
+                .map(crate::schema_infer::references_from_document)
+                .collect();
+            let columns = crate::schema_infer::infer(&types, &refs);
+            (table, columns)
+        }
+    });
+    let fetched: Vec<(String, Vec<crate::schema_infer::ColumnInfo>)> =
+        futures::future::join_all(fetches).await;
+
+    // Assemble the response envelope.
+    let mut tables_json: Vec<Value> = Vec::new();
+    let mut columns_json = serde_json::Map::new();
+    let mut foreign_keys_json = serde_json::Map::new();
+
+    for (table, columns) in fetched {
+        tables_json.push(json!({
+            "name": table,
+            "schema": Value::Null,
+            "comment": Value::Null
+        }));
+        let cols_arr: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
+        columns_json.insert(table.clone(), Value::Array(cols_arr));
+
+        let fks: Vec<Value> = columns
+            .iter()
+            .filter_map(|c| {
+                c.references.as_ref().map(|target| {
+                    json!({
+                        "from_column": c.name.clone(),
+                        "to_table": target.clone(),
+                        "to_column": "__id__"
+                    })
+                })
+            })
+            .collect();
+        if !fks.is_empty() {
+            foreign_keys_json.insert(table, Value::Array(fks));
+        }
+    }
+
+    tables_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
     ok_response(
         id,
-        json!({ "tables": [], "columns": {}, "foreign_keys": {} }),
+        json!({
+            "tables": tables_json,
+            "columns": Value::Object(columns_json),
+            "foreign_keys": Value::Object(foreign_keys_json)
+        }),
     )
 }
 
@@ -182,7 +276,9 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
             Ok(db) => db,
             Err(resp) => return resp,
         };
-        let n = crate::state::settings().map(|s| s.sample_size).unwrap_or(50);
+        let n = crate::state::settings()
+            .map(|s| s.sample_size)
+            .unwrap_or(50);
 
         let fetches = to_fetch.into_iter().map(|table| async move {
             let docs: Vec<firestore::FirestoreDocument> = db
@@ -197,7 +293,11 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
                 .iter()
                 .map(crate::schema_infer::types_from_document)
                 .collect();
-            (table, crate::schema_infer::infer(&sample))
+            let refs: Vec<crate::schema_infer::DocumentReferences> = docs
+                .iter()
+                .map(crate::schema_infer::references_from_document)
+                .collect();
+            (table, crate::schema_infer::infer(&sample, &refs))
         });
 
         let fetched = futures::future::join_all(fetches).await;

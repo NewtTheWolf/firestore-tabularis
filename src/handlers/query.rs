@@ -76,6 +76,23 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
 
+    // Pre-flight Firestore restriction validation (before any I/O).
+    if let Some(filter) = &parsed.where_clause {
+        if let Err(msg) = crate::firestore_filter::validate(filter) {
+            return crate::rpc::error_response(id, -32602, &msg, None);
+        }
+    }
+
+    // Resolve effective limit/offset: params.page/page_size override SQL.
+    let host_page_size: Option<u64> = params.get("page_size").and_then(Value::as_u64);
+    let host_page: Option<u64> = params.get("page").and_then(Value::as_u64);
+
+    let effective_limit: u64 = host_page_size.or(parsed.limit).unwrap_or(100);
+    let effective_offset: u64 = match host_page {
+        Some(p) if p > 1 => (p - 1) * effective_limit,
+        _ => parsed.offset.unwrap_or(0),
+    };
+
     let db = match resolve_client(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
@@ -97,22 +114,171 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         .collect();
 
     let mut q = db.fluent().select().from(parsed.table.as_str());
-    if !order_items.is_empty() {
-        q = q.order_by(order_items);
-    }
-    if let Some(n) = parsed.limit {
-        q = q.limit(n as u32);
-    }
-    if let Some(o) = parsed.offset {
-        q = q.offset(o as u32);
+
+    if let Some(filter) = &parsed.where_clause {
+        let firestore_filter = crate::firestore_filter::build_filter(filter);
+        q = q.filter(move |_| Some(firestore_filter.clone()));
     }
 
+    if !order_items.is_empty() {
+        q = q.order_by(order_items.clone());
+    }
+
+    // Apply effective limit unconditionally.
+    q = q.limit(effective_limit as u32);
+
+    // Build query key for cursor and count caches.
+    let query_key = crate::state::QueryKey {
+        table: parsed.table.clone(),
+        where_canonical: parsed
+            .where_clause
+            .as_ref()
+            .map(canonical_filter)
+            .unwrap_or_default(),
+        order_by_canonical: canonical_order_by(&parsed.order_by),
+    };
+
+    // Look up a cached cursor for this offset (write lock required — TtlLruCache::get is &mut).
+    let cursor_doc: Option<firestore::FirestoreDocument> = if effective_offset > 0 {
+        crate::state::CURSOR_CACHE
+            .write()
+            .unwrap()
+            .get(&query_key)
+            .and_then(|entry| entry.cursors.get(&effective_offset).cloned())
+    } else {
+        None
+    };
+
+    if let Some(ref doc) = cursor_doc {
+        // Build AfterValue cursor from the last document of the previous page.
+        // Extract the ordered field values; fall back to the document reference
+        // (__name__) when no ORDER BY was specified.
+        let cursor_values: Vec<firestore::FirestoreValue> = if order_items.is_empty() {
+            // No ORDER BY — Firestore implicitly orders by __name__ (the doc path).
+            vec![firestore::FirestoreValue::from(
+                gcloud_sdk::google::firestore::v1::Value {
+                    value_type: Some(
+                        gcloud_sdk::google::firestore::v1::value::ValueType::ReferenceValue(
+                            doc.name.clone(),
+                        ),
+                    ),
+                },
+            )]
+        } else {
+            order_items
+                .iter()
+                .map(|(field, _dir)| {
+                    let proto_val =
+                        doc.fields.get(field).cloned().unwrap_or(
+                            gcloud_sdk::google::firestore::v1::Value { value_type: None },
+                        );
+                    firestore::FirestoreValue::from(proto_val)
+                })
+                .collect()
+        };
+        q = q.start_at(firestore::FirestoreQueryCursor::AfterValue(cursor_values));
+    } else if effective_offset > 0 {
+        // No cursor cached — fall back to OFFSET (skip).
+        q = q.offset(effective_offset as u32);
+    }
+
+    // Build cache key for count.
+    let count_key = crate::state::CountKey {
+        table: parsed.table.clone(),
+        where_canonical: parsed
+            .where_clause
+            .as_ref()
+            .map(canonical_filter)
+            .unwrap_or_default(),
+    };
+
+    let cached_count: Option<u64> = crate::state::COUNT_CACHE
+        .write()
+        .unwrap()
+        .get(&count_key)
+        .copied();
+
     let started = std::time::Instant::now();
-    let docs: Vec<firestore::FirestoreDocument> = match q.query().await {
+
+    let (docs_result, count_result) = if let Some(c) = cached_count {
+        // Cache hit — only run the data query.
+        let d = q.query().await;
+        (d, Ok(Some(c)))
+    } else {
+        // Build a separate count query with the same filter (no order/limit/offset).
+        let mut count_q = db.fluent().select().from(parsed.table.as_str());
+        if let Some(filter) = &parsed.where_clause {
+            let cf = crate::firestore_filter::build_filter(filter);
+            count_q = count_q.filter(move |_| Some(cf.clone()));
+        }
+        let count_fut = count_q
+            .aggregate(|a| a.fields([a.field("count").count()]))
+            .query();
+        let (docs_res, agg_res) = tokio::join!(q.query(), count_fut);
+        // Extract the count integer from the aggregation result document.
+        // Returns Ok(Some(n)) on success, Ok(None) if the shape is unexpected,
+        // or Err if the Firestore RPC itself failed.
+        let count_res: Result<Option<u64>, firestore::errors::FirestoreError> = match agg_res {
+            Ok(docs) => {
+                let n = docs
+                    .first()
+                    .and_then(|d| d.fields.get("count"))
+                    .and_then(|v| {
+                        if let Some(
+                            gcloud_sdk::google::firestore::v1::value::ValueType::IntegerValue(n),
+                        ) = &v.value_type
+                        {
+                            Some(*n as u64)
+                        } else {
+                            None
+                        }
+                    });
+                Ok(n)
+            }
+            Err(e) => Err(e),
+        };
+        (docs_res, count_res)
+    };
+
+    let elapsed = started.elapsed().as_millis() as u64;
+
+    let docs: Vec<firestore::FirestoreDocument> = match docs_result {
         Ok(d) => d,
         Err(e) => return error_from_query(id, &e),
     };
-    let elapsed = started.elapsed().as_millis() as u64;
+
+    // Update cursor cache: store the last doc as the cursor for the next page offset.
+    if let Some(last_doc) = docs.last() {
+        let next_offset = effective_offset + docs.len() as u64;
+        let mut cache = crate::state::CURSOR_CACHE.write().unwrap();
+        // Clone existing cursors (if any) before re-borrowing for insert.
+        let existing_cursors = cache.get(&query_key).map(|e| e.cursors.clone());
+        let mut cursors = existing_cursors.unwrap_or_default();
+        cursors.insert(next_offset, last_doc.clone());
+        cache.insert(query_key, crate::state::CursorEntry { cursors });
+    }
+
+    let total_count: u64 = match count_result {
+        Ok(Some(n)) => {
+            crate::state::COUNT_CACHE
+                .write()
+                .unwrap()
+                .insert(count_key, n);
+            n
+        }
+        Ok(None) => {
+            // Firestore returned an aggregation result but without the expected
+            // integer "count" field. Skip the cache to avoid a stale zero being
+            // served to subsequent callers, and fall back to docs.len().
+            eprintln!("count aggregation returned unexpected shape (falling back to rows.len)");
+            docs.len() as u64
+        }
+        Err(e) => {
+            // Count RPC failed. Non-fatal — fall back to docs.len().
+            eprintln!("count failed (falling back to rows.len): {e}");
+            docs.len() as u64
+        }
+    };
 
     let columns = match crate::state::SCHEMA_CACHE
         .read()
@@ -126,7 +292,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                 .iter()
                 .map(crate::schema_infer::types_from_document)
                 .collect();
-            crate::schema_infer::infer(&sample)
+            crate::schema_infer::infer(&sample, &[])
         }
     };
 
@@ -138,7 +304,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         json!({
             "columns": column_names,
             "rows": rows,
-            "total_count": rows.len(),
+            "total_count": total_count,
             "affected_rows": 0,
             "execution_time_ms": elapsed,
         }),
@@ -191,18 +357,13 @@ fn serialize_value(v: &gcloud_sdk::google::firestore::v1::Value) -> Value {
         }
         Some(V::ReferenceValue(r)) => Value::String(r.clone()),
         Some(V::GeoPointValue(g)) => json!({ "lat": g.latitude, "lng": g.longitude }),
-        Some(V::ArrayValue(a)) => {
-            let items: Vec<Value> = a.values.iter().map(serialize_value).collect();
-            Value::String(serde_json::to_string(&items).unwrap_or_default())
-        }
-        Some(V::MapValue(m)) => {
-            let map: serde_json::Map<String, Value> = m
-                .fields
+        Some(V::ArrayValue(a)) => Value::Array(a.values.iter().map(serialize_value).collect()),
+        Some(V::MapValue(m)) => Value::Object(
+            m.fields
                 .iter()
                 .map(|(k, x)| (k.clone(), serialize_value(x)))
-                .collect();
-            Value::String(serde_json::to_string(&Value::Object(map)).unwrap_or_default())
-        }
+                .collect(),
+        ),
         // Extra proto variants not used in standard Firestore storage:
         Some(V::FieldReferenceValue(_)) => Value::Null,
         Some(V::FunctionValue(_)) => Value::Null,
@@ -230,6 +391,230 @@ async fn resolve_client(id: Value) -> Result<&'static firestore::FirestoreDb, Va
         .map_err(|err| crate::rpc::error_response(id.clone(), err.code, &err.message, None))
 }
 
-pub fn explain_query(id: Value, _params: &Value) -> Value {
-    crate::rpc::not_implemented(id, "explain_query")
+pub async fn explain_query(id: Value, params: &Value) -> Value {
+    let sql = params
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let parsed = match crate::query_parser::parse(&sql) {
+        Ok(p) => p,
+        Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
+    };
+
+    let db = match resolve_client(id.clone()).await {
+        Ok(db) => db,
+        Err(resp) => return resp,
+    };
+
+    if let Some(filter) = &parsed.where_clause {
+        if let Err(msg) = crate::firestore_filter::validate(filter) {
+            return crate::rpc::error_response(id, -32602, &msg, None);
+        }
+    }
+
+    let mut q = db.fluent().select().from(parsed.table.as_str());
+
+    if let Some(filter) = &parsed.where_clause {
+        let firestore_filter = crate::firestore_filter::build_filter(filter);
+        q = q.filter(move |_| Some(firestore_filter.clone()));
+    }
+
+    let order_items: Vec<(String, firestore::FirestoreQueryDirection)> = parsed
+        .order_by
+        .iter()
+        .map(|i| {
+            (
+                i.field.clone(),
+                if i.desc {
+                    firestore::FirestoreQueryDirection::Descending
+                } else {
+                    firestore::FirestoreQueryDirection::Ascending
+                },
+            )
+        })
+        .collect();
+
+    if !order_items.is_empty() {
+        q = q.order_by(order_items);
+    }
+
+    if let Some(n) = parsed.limit {
+        q = q.limit(n as u32);
+    }
+
+    // Enable explain mode (sets explain_options on the query params).
+    // The explain metrics are returned in the metadata of the last stream item.
+    let started = std::time::Instant::now();
+    let stream_result = q.explain().stream_query_with_metadata().await;
+    let elapsed = started.elapsed().as_millis() as u64;
+
+    let stream = match stream_result {
+        Ok(s) => s,
+        Err(e) => return error_from_query(id, &e),
+    };
+
+    use futures::TryStreamExt;
+    let items: Vec<firestore::FirestoreWithMetadata<firestore::FirestoreDocument>> =
+        match stream.try_collect().await {
+            Ok(v) => v,
+            Err(e) => return error_from_query(id, &e),
+        };
+
+    // The explain metrics live in the last item's metadata (Firestore streams
+    // them in the terminal RunQueryResponse that has no document payload).
+    let explain_metrics = items
+        .last()
+        .and_then(|item| item.metadata.explain_metrics.as_ref());
+
+    // Build the plan_summary JSON: list of index descriptors.
+    let indexes_used: Value = explain_metrics
+        .and_then(|m| m.plan_summary.as_ref())
+        .map(|ps| {
+            let list: Vec<Value> = ps
+                .indexes_used
+                .iter()
+                .map(|idx| {
+                    let obj: serde_json::Map<String, Value> = idx
+                        .fields
+                        .iter()
+                        .map(|(k, v)| (k.clone(), proto_value_to_json(v)))
+                        .collect();
+                    Value::Object(obj)
+                })
+                .collect();
+            Value::Array(list)
+        })
+        .unwrap_or(Value::Array(vec![]));
+
+    // Build execution_stats JSON.
+    let (results_returned, execution_duration_ms, read_operations) =
+        if let Some(stats) = explain_metrics.and_then(|m| m.execution_stats.as_ref()) {
+            let duration_ms = stats
+                .execution_duration
+                .map(|d| d.num_milliseconds())
+                .unwrap_or(0);
+            (
+                stats.results_returned as u64,
+                duration_ms,
+                stats.read_operations as u64,
+            )
+        } else {
+            (0, 0, 0)
+        };
+
+    // Build a human-readable plan_text.
+    let plan_text = format!(
+        "table={} filter={} order_by=[{}] limit={:?} indexes_used={}",
+        parsed.table,
+        parsed
+            .where_clause
+            .as_ref()
+            .map(canonical_filter)
+            .unwrap_or_else(|| "(none)".to_string()),
+        canonical_order_by(&parsed.order_by),
+        parsed.limit,
+        indexes_used,
+    );
+
+    crate::rpc::ok_response(
+        id,
+        json!({
+            "plan_text": plan_text,
+            "documents_returned": results_returned,
+            "documents_scanned": read_operations,
+            "index_used": !indexes_used.as_array().map(|a| a.is_empty()).unwrap_or(true),
+            "indexes_used": indexes_used,
+            "execution_duration_ms": execution_duration_ms,
+            "elapsed_ms": elapsed,
+        }),
+    )
+}
+
+/// Convert a `prost_types::Value` to a `serde_json::Value` for JSON serialisation.
+fn proto_value_to_json(v: &gcloud_sdk::prost_types::Value) -> Value {
+    use gcloud_sdk::prost_types::value::Kind;
+    match v.kind.as_ref() {
+        Some(Kind::NullValue(_)) | None => Value::Null,
+        Some(Kind::BoolValue(b)) => Value::Bool(*b),
+        Some(Kind::NumberValue(n)) => json!(n),
+        Some(Kind::StringValue(s)) => Value::String(s.clone()),
+        Some(Kind::StructValue(sv)) => Value::Object(
+            sv.fields
+                .iter()
+                .map(|(k, val)| (k.clone(), proto_value_to_json(val)))
+                .collect(),
+        ),
+        Some(Kind::ListValue(lv)) => {
+            Value::Array(lv.values.iter().map(proto_value_to_json).collect())
+        }
+    }
+}
+
+/// Stable canonical form of a FilterExpr for cache keys.
+pub(crate) fn canonical_filter(expr: &crate::query_parser::FilterExpr) -> String {
+    use crate::query_parser::FilterExpr as F;
+    match expr {
+        F::Compare { field, op, value } => {
+            format!(
+                "(cmp {} {:?} {})",
+                field.join("."),
+                op,
+                canonical_literal(value)
+            )
+        }
+        F::In {
+            field,
+            values,
+            negated,
+        } => {
+            let mut vs: Vec<String> = values.iter().map(canonical_literal).collect();
+            vs.sort();
+            format!(
+                "({} {} [{}])",
+                if *negated { "not_in" } else { "in" },
+                field.join("."),
+                vs.join(",")
+            )
+        }
+        F::ArrayContains { field, value } => {
+            format!("(ac {} {})", field.join("."), canonical_literal(value))
+        }
+        F::ArrayContainsAny { field, values } => {
+            let mut vs: Vec<String> = values.iter().map(canonical_literal).collect();
+            vs.sort();
+            format!("(aca {} [{}])", field.join("."), vs.join(","))
+        }
+        F::And(children) => {
+            let mut parts: Vec<String> = children.iter().map(canonical_filter).collect();
+            parts.sort();
+            format!("(and {})", parts.join(" "))
+        }
+        F::Or(children) => {
+            let mut parts: Vec<String> = children.iter().map(canonical_filter).collect();
+            parts.sort();
+            format!("(or {})", parts.join(" "))
+        }
+    }
+}
+
+pub(crate) fn canonical_literal(lit: &crate::query_parser::Literal) -> String {
+    use crate::query_parser::Literal as L;
+    match lit {
+        L::Str(s) => format!("'{s}'"),
+        L::Int(n) => n.to_string(),
+        L::Float(f) => format!("{f:?}"),
+        L::Bool(b) => b.to_string(),
+        L::Null => "null".to_string(),
+        L::Timestamp(dt) => format!("ts:{}", dt.to_rfc3339()),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn canonical_order_by(items: &[crate::query_parser::OrderItem]) -> String {
+    items
+        .iter()
+        .map(|i| format!("{} {}", i.field, if i.desc { "DESC" } else { "ASC" }))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
