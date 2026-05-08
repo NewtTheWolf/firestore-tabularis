@@ -139,6 +139,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             "columns": column_names,
             "rows": rows,
             "total_count": rows.len(),
+            "affected_rows": 0,
             "execution_time_ms": elapsed,
         }),
     )
