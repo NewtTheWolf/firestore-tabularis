@@ -37,13 +37,18 @@ pub struct ColumnInfo {
 
 impl ColumnInfo {
     pub fn to_json(&self) -> Value {
+        // Field names match the working tabularis-google-sheets-plugin reference
+        // implementation, not the published PLUGIN_GUIDE.md (which is stale on
+        // these names). Tabularis runtime parses `default_value` and `is_pk`,
+        // NOT `column_default`/`is_primary_key`.
         json!({
             "name": self.name,
             "data_type": self.data_type,
             "is_nullable": self.is_nullable,
-            "column_default": Value::Null,
-            "is_primary_key": self.name == "__id__",
+            "default_value": Value::Null,
+            "is_pk": self.name == "__id__",
             "is_auto_increment": false,
+            "character_maximum_length": Value::Null,
             "comment": if self.name == "__id__" { Value::String("Firestore document ID".into()) } else { Value::Null },
         })
     }
@@ -245,7 +250,7 @@ mod tests {
     fn id_column_serialises_as_primary_key() {
         let cols = infer(&[]);
         let json = cols[0].to_json();
-        assert_eq!(json["is_primary_key"], serde_json::Value::Bool(true));
+        assert_eq!(json["is_pk"], serde_json::Value::Bool(true));
         assert_eq!(
             json["comment"],
             serde_json::Value::String("Firestore document ID".into())
