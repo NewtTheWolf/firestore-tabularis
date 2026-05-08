@@ -14,7 +14,7 @@ A Tabularis driver plugin targeting **Google Cloud Firestore**. The plugin is a 
 - `get_databases` — returns `[database_id]` from settings
 - `get_tables` — lists root Firestore collections sorted alphabetically
 - `get_columns` — samples up to `sample_size` documents per collection, infers types + reference targets via `schema_infer`, caches results in `SCHEMA_CACHE`
-- `execute_query` — parses the full Phase-2 SQL subset (WHERE with AND/OR/NOT IN/parens, ARRAY_CONTAINS / ARRAY_CONTAINS_ANY, IN, six comparison operators, ORDER BY, LIMIT, OFFSET, host `page`/`page_size` params); runs filter + aggregation in parallel; cursor-based pagination via CURSOR_CACHE with OFFSET fallback; returns `{ columns, rows, total_count, execution_time_ms }`. Map/Array values render as native JSON (objects/arrays), not stringified.
+- `execute_query` — parses the full Phase-2 SQL subset (WHERE with AND/OR/NOT IN/parens, ARRAY_CONTAINS / ARRAY_CONTAINS_ANY, IN, six comparison operators, ORDER BY, LIMIT, OFFSET, host `page`/`page_size` params); runs filter + aggregation in parallel; cursor-based pagination via CURSOR_CACHE with OFFSET fallback; returns `{ columns, rows, total_count, execution_time_ms }`. Map/Array values are JSON-stringified for the row payload (Tabularis' grid hover renders nested objects as `[object Object]`, so we ship them as strings).
 - `get_schema_snapshot` — parallel-fetches every root collection, infers columns + foreign-key relationships from `referenceValue` fields, returns the ER-diagram envelope `{ tables, columns, foreign_keys }`
 - `explain_query` — runs the Firestore EXPLAIN/ANALYZE stream and forwards `documents_returned`, `documents_scanned`, `index_used`, `execution_duration_ms`
 

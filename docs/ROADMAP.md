@@ -16,7 +16,7 @@ This file tracks the planned evolution of the firestore Tabularis plugin. Phase 
 
 ## Phase 2 — Query layer + Map polish ✅ shipped 2026-05-08
 
-Shipped: full WHERE/AND/OR/NOT IN/parens grammar, six comparison ops, IN, ARRAY_CONTAINS / ARRAY_CONTAINS_ANY, TIMESTAMP literals, parallel COUNT aggregation with TTL cache for `total_count`, cursor-based pagination via CURSOR_CACHE with OFFSET fallback, native JSON for Map and Array cell values, ER-diagram via inferred reference foreign keys, four new structured error mappings (PERMISSION_DENIED / RESOURCE_EXHAUSTED / DEADLINE_EXCEEDED / UNAVAILABLE), and `explain_query` returning the Firestore query plan. Native-JSON-for-maps decision: kept (no revert needed; smoke test against Tabularis pending).
+Shipped: full WHERE/AND/OR/NOT IN/parens grammar, six comparison ops, IN, ARRAY_CONTAINS / ARRAY_CONTAINS_ANY, TIMESTAMP literals, parallel COUNT aggregation with TTL cache for `total_count`, cursor-based pagination via CURSOR_CACHE with OFFSET fallback, ER-diagram via inferred reference foreign keys, four new structured error mappings (PERMISSION_DENIED / RESOURCE_EXHAUSTED / DEADLINE_EXCEEDED / UNAVAILABLE), and `explain_query` returning the Firestore query plan. Native-JSON-for-maps decision: reverted — Tabularis hover-tooltip rendered objects as `[object Object]`, so Map/Array cells stay JSON-stringified for now (Tabularis-side bug to file before re-enabling native JSON in Phase 4's data-grid UI extension).
 
 The biggest UX hebel after Phase 1. Turns the plugin from "data browser" into "daily driver".
 

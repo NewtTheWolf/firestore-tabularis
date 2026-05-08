@@ -367,13 +367,18 @@ fn serialize_value(v: &gcloud_sdk::google::firestore::v1::Value) -> Value {
         }
         Some(V::ReferenceValue(r)) => Value::String(r.clone()),
         Some(V::GeoPointValue(g)) => json!({ "lat": g.latitude, "lng": g.longitude }),
-        Some(V::ArrayValue(a)) => Value::Array(a.values.iter().map(serialize_value).collect()),
-        Some(V::MapValue(m)) => Value::Object(
-            m.fields
+        Some(V::ArrayValue(a)) => {
+            let items: Vec<Value> = a.values.iter().map(serialize_value).collect();
+            Value::String(serde_json::to_string(&items).unwrap_or_default())
+        }
+        Some(V::MapValue(m)) => {
+            let map: serde_json::Map<String, Value> = m
+                .fields
                 .iter()
                 .map(|(k, x)| (k.clone(), serialize_value(x)))
-                .collect(),
-        ),
+                .collect();
+            Value::String(serde_json::to_string(&Value::Object(map)).unwrap_or_default())
+        }
         // Extra proto variants not used in standard Firestore storage:
         Some(V::FieldReferenceValue(_)) => Value::Null,
         Some(V::FunctionValue(_)) => Value::Null,
