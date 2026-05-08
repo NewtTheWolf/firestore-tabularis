@@ -92,13 +92,13 @@ jobs:
         run: |
           STAGE=staging
           mkdir -p "$STAGE"
-          cp target/${{ matrix.target }}/release/db-type-api-plugin${{ matrix.binary-suffix }} "$STAGE/"
+          cp target/${{ matrix.target }}/release/firestore-plugin${{ matrix.binary-suffix }} "$STAGE/"
           cp manifest.json "$STAGE/"
           if [ -f ui/dist/index.js ]; then
             mkdir -p "$STAGE/ui/dist"
             cp ui/dist/index.js "$STAGE/ui/dist/"
           fi
-          (cd "$STAGE" && zip -r ../db-type-api-plugin-${{ matrix.platform-label }}.zip .)
+          (cd "$STAGE" && zip -r ../firestore-plugin-${{ matrix.platform-label }}.zip .)
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -106,15 +106,15 @@ jobs:
         run: |
           $stage = "staging"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\db-type-api-plugin${{ matrix.binary-suffix }}" $stage
+          Copy-Item "target\${{ matrix.target }}\release\firestore-plugin${{ matrix.binary-suffix }}" $stage
           Copy-Item "manifest.json" $stage
           if (Test-Path "ui\dist\index.js") {
             New-Item -ItemType Directory -Force -Path "$stage\ui\dist" | Out-Null
             Copy-Item "ui\dist\index.js" "$stage\ui\dist"
           }
-          Compress-Archive -Path "$stage\*" -DestinationPath "db-type-api-plugin-${{ matrix.platform-label }}.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath "firestore-plugin-${{ matrix.platform-label }}.zip"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: db-type-api-plugin-${{ matrix.platform-label }}.zip
+          files: firestore-plugin-${{ matrix.platform-label }}.zip

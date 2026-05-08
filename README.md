@@ -9,39 +9,46 @@ Generated with `@tabularis/create-plugin`.
 just dev-install       # build + install into ~/.local/share/tabularis/plugins/firestore
 ```
 
-Then open Tabularis — your driver appears in the connection picker. `test_connection` is stubbed to return success so you can immediately see the plugin wired up.
+Then open Tabularis — your driver appears in the connection picker.
 
-## What's implemented
+## What's implemented (Phase 1)
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `test_connection` | placeholder | returns `{success: true}` unconditionally — replace with a real check before shipping |
-| `ping` | minimal | returns `null`; falls back to `test_connection` if missing |
-| `get_databases`, `get_schemas`, `get_tables`, `get_columns`, `get_indexes`, `get_foreign_keys` | stubs | return `[]` — fill these in to populate the sidebar |
-| `get_views*`, `get_routines*`, `create_view`, `alter_view`, `drop_view` | `-32601` | not implemented — flip `capabilities.views` / `capabilities.routines` once you wire these |
-| `execute_query`, `explain_query` | `-32601` | implement first if you want query execution in the UI |
-| `insert_record`, `update_record`, `delete_record` | `-32601` | implement for row editing support |
-| DDL generators, batch methods | `-32601` | implement as you light up the matching UI features |
+| `initialize` | implemented | reads plugin-wide settings (`project_id`, `database_id`, `service_account_path`, `emulator_host`, `sample_size`) |
+| `test_connection`, `ping` | implemented | builds `FirestoreDb` lazily; probes by listing root collections; ping fast-path returns `null` when client is already up |
+| `get_databases` | implemented | returns `[database_id]` from settings |
+| `get_tables` | implemented | lists root Firestore collections, alphabetical |
+| `get_columns` | implemented | samples up to `sample_size` documents per collection, infers types, caches per-process |
+| `execute_query` | partial | accepts `SELECT * FROM "<col>" [ORDER BY field [ASC\|DESC], …] [LIMIT n] [OFFSET n]`. Anything else (WHERE/JOIN/aggregations) returns a clear "Phase 2" error |
+| `explain_query`, `insert_record`, `update_record`, `delete_record` | `-32601` | Phase 3 |
+| DDL generators (`get_*_sql`, `drop_*`) | `-32601` | likely permanently not_implemented for Firestore |
+| `create_view`, `alter_view`, `drop_view` | `-32601` | Firestore has no views |
+| `get_views*`, `get_routines*`, `get_indexes`, `get_foreign_keys` | empty arrays | Firestore has no relational analogues |
 
 ## Layout
 
 ```
 src/
-├── main.rs            thin stdio loop
-├── rpc.rs             method dispatch + response helpers
-├── error.rs           plugin error type
-├── models.rs          ConnectionParams + common shapes
-├── client.rs          connection config (stub — implement your driver here)
+├── main.rs              thin stdio loop
+├── rpc.rs               method dispatch + response helpers
+├── error.rs             plugin error type
+├── models.rs            ConnectionParams + common shapes
+├── client.rs            connection config — builds FirestoreDb from settings
+├── state.rs             globals: SETTINGS, CLIENT, SCHEMA_CACHE
+├── firestore_error.rs   error mapping with missing-index URL extraction
+├── schema_infer.rs      sample-based column inference
+├── query_parser.rs      SELECT * SQL parser
 ├── handlers/
-│   ├── metadata.rs    databases, schemas, tables, columns, indexes, FKs, views, routines
-│   ├── query.rs       test_connection, ping, execute_query, explain_query
-│   ├── crud.rs        insert_record, update_record, delete_record
-│   └── ddl.rs         CREATE/ALTER/DROP generators
+│   ├── metadata.rs      databases, schemas, tables, columns, indexes, FKs, views, routines
+│   ├── query.rs         test_connection, ping, execute_query, explain_query
+│   ├── crud.rs          insert_record, update_record, delete_record
+│   └── ddl.rs           CREATE/ALTER/DROP generators
 ├── utils/
-│   ├── identifiers.rs quote_identifier(name) + tests
-│   └── pagination.rs  paginate(query, page, size) + tests
+│   ├── identifiers.rs   quote_identifier(name) + tests
+│   └── pagination.rs    paginate(query, page, size) + tests
 └── bin/
-    └── test_plugin.rs local REPL for simulating Tabularis calls
+    └── test_plugin.rs   local REPL for simulating Tabularis calls
 ```
 
 ## Testing without Tabularis

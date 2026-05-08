@@ -8,6 +8,7 @@
 /// assert_eq!(quote_identifier("weird\"name", '"'), "\"weird\"\"name\"");
 /// assert_eq!(quote_identifier("items", '`'),  "`items`");
 /// ```
+#[allow(dead_code)]
 pub fn quote_identifier(name: &str, quote: char) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push(quote);

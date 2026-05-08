@@ -6,7 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Tabularis driver plugin targeting **Google Cloud Firestore**. The plugin is a standalone Rust binary (`firestore-plugin`) that Tabularis spawns as a child process and talks to over **JSON-RPC 2.0 on stdio** (one request per line on stdin, one response per line on stdout, stderr free for logging). The same process is reused for the entire connection session.
 
-The current codebase is the unmodified `@tabularis/create-plugin` scaffold renamed to `firestore`. Every method either echoes `{success: true}`, returns an empty array, or returns JSON-RPC `-32601 method not implemented`. The Firestore driver itself is not yet wired up — `client.rs` is an empty `Client { params: ConnectionParams }` waiting for the real implementation.
+**Phase 1 is implemented.** The dispatch loop is async (`#[tokio::main(flavor = "multi_thread")]`). The following methods are fully wired:
+
+- `initialize` — stores `Settings` (project ID, database ID, service-account path, emulator host, sample size) in the global `SETTINGS` cell
+- `test_connection` — builds `FirestoreDb` via `client::build`, pings the root collection list
+- `ping` — fast-path returning `Null` directly in `rpc.rs` (no Firestore round-trip)
+- `get_databases` — returns `[database_id]` from settings
+- `get_tables` — lists root Firestore collections sorted alphabetically
+- `get_columns` — samples up to `sample_size` documents per collection, infers types via `schema_infer`, caches results in `SCHEMA_CACHE`
+- `execute_query` — parses a `SELECT * FROM "<collection>" [ORDER BY …] [LIMIT n] [OFFSET n]` subset via `query_parser`, runs the Firestore query, returns `{ columns, rows, total_count, execution_time_ms }`
+
+Pure-logic modules (no Firestore I/O, fully unit-tested):
+- `query_parser` — hand-rolled SQL tokeniser/parser for the Phase 1 SELECT subset
+- `schema_infer` — sample-based field-type inference (maps Firestore proto types → `string/number/boolean/timestamp/…/mixed`)
+- `firestore_error` — gRPC status classifier with missing-index URL extraction
+
+Phase 2/3/4 handlers (`insert_record`, `update_record`, `delete_record`, DDL generators, complex WHERE/JOIN queries, subcollections) still return JSON-RPC `-32601 method not implemented`.
 
 Naming convention used in this repo:
 - Cargo crate / binary: `firestore-plugin` (deliberately suffixed to avoid shadowing the `firestore` crate from crates.io that we'll likely depend on)
@@ -90,7 +105,7 @@ Capability flags in `manifest.json` need to reflect this:
 
 ### Stdio dispatch loop
 
-`main.rs` is a tight `BufRead::lines()` loop: read one JSON line, hand it to `rpc::handle_line`, write the serialised response + newline to stdout, flush. No threading, no async. If serialisation itself fails, a hand-rolled `-32603` error string is written so the host always sees valid JSON-RPC. This will need to switch to **async** once `firestore-rs` (Tokio-based) is wired in — see "Firestore-rs integration" below.
+`main.rs` runs under `#[tokio::main(flavor = "multi_thread")]`. The loop reads one JSON line at a time from stdin via `BufRead::lines`, `.await`s `rpc::handle_line` (which is `async`), writes the serialised response + newline to stdout, and flushes. If serialisation itself fails, a hand-rolled `-32603` error string is written so the host always sees valid JSON-RPC.
 
 `rpc::handle_line` is the single match table mapping method name → handler. Three response helpers in `rpc.rs`: `ok_response`, `error_response`, `not_implemented`.
 
@@ -102,36 +117,31 @@ Capability flags in `manifest.json` need to reflect this:
 - `crud.rs` — row-level `insert/update/delete_record`
 - `ddl.rs` — `get_*_sql` generators + `drop_index/drop_foreign_key`
 
-Stubs return either empty arrays (so the sidebar loads without errors) or `-32601`. Pick stubs to flesh out based on which Tabularis UI surfaces you want to enable.
+Phase 1 wired: `test_connection`, `execute_query` (in `query.rs`); `get_databases`, `get_tables`, `get_columns` (in `metadata.rs`). Remaining stubs return either empty arrays (so the sidebar loads without errors) or `-32601 method not implemented`. Phase 2 priority: CRUD handlers in `crud.rs`.
 
 ### Connection params shape
 
 Tabularis wraps connection params one level deeper than you might expect: the inner object lives at `params.params` in the request. Use `models::inner_params(&params)` before calling `ConnectionParams::from_value` — every connection-aware handler will need this. For Firestore we'll likely repurpose `host` as the project ID and `password` as either the service-account JSON path or a token, or extend `ConnectionParams` with Firestore-specific fields.
 
-### Driver layer (the empty seat) — Firestore-rs integration
+### Driver layer — Firestore-rs integration
 
-`client.rs` is a deliberately near-empty `Client { params: ConnectionParams }`. The plan is to wire <https://github.com/abdolence/firestore-rs> (`firestore` crate, currently 0.48):
+`client.rs` exposes `client::build(settings) -> Result<FirestoreDb, PluginError>`. It reads `Settings` (set during `initialize`) to configure `FirestoreDbOptions` and builds a `FirestoreDb`:
 
-```toml
-firestore = "0.48"
-rustls = "0.23"   # required TLS provider
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-```
+- If `settings.service_account_path` is set, uses `FirestoreDb::with_options_service_account_key_file()`
+- If `settings.emulator_host` is set, routes to the local emulator instead of production
+- Otherwise falls through to Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS` env var → `gcloud auth application-default login` → GCE metadata server)
 
-Auth resolution order (per firestore-rs):
-1. `GOOGLE_APPLICATION_CREDENTIALS` env var → service-account JSON
-2. `gcloud auth application-default login` (note: ADC, **not** `gcloud auth login`)
-3. GCE metadata server when running on Google infrastructure
-4. Explicit: `FirestoreDb::with_options_service_account_key_file()`
+The client is stored in `state::CLIENT` (`OnceCell<FirestoreDb>`) so the TLS handshake runs at most once per process lifetime.
 
-Emulator support: set `FIRESTORE_EMULATOR_HOST=localhost:8080` before launching Tabularis. We should expose this as a setting.
+`state.rs` holds three globals:
+- `SETTINGS: OnceLock<Settings>` — populated by `initialize`, read by every handler
+- `CLIENT: OnceCell<FirestoreDb>` — lazily built on the first connection-requiring call
+- `SCHEMA_CACHE: RwLock<HashMap<String, Vec<ColumnInfo>>>` — populated by `get_columns`, reused on subsequent calls
 
-Common gotchas the docs flag:
-- "Crypto provider error" → install `rustls`
+Common gotchas (still relevant for future work):
+- "Crypto provider error" → `rustls` must be installed (already in `Cargo.toml`)
 - Transactions can't auto-generate doc IDs — always supply explicit IDs in `update()`
 - Docker images need root CA certs for TLS
-
-Once `Client::connect` is wired, **remove the crate-level `#![allow(dead_code)]` in `main.rs`** so the compiler starts flagging genuinely unused code again. The dispatch loop will need a Tokio runtime — either `#[tokio::main]` on `main` or block_on inside each handler.
 
 ### REPL caveat
 

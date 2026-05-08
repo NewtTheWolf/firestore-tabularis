@@ -8,6 +8,7 @@
 ///   "SELECT * FROM users LIMIT 50 OFFSET 50"
 /// );
 /// ```
+#[allow(dead_code)]
 pub fn paginate(query: &str, page: u64, page_size: u64) -> String {
     let safe_page = page.max(1);
     let offset = (safe_page - 1).saturating_mul(page_size);

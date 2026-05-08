@@ -4,7 +4,7 @@
   "name": "Firestore",
   "version": "0.1.0",
   "description": "Tabularis driver plugin for Google Firestore",
-  "default_port": 5432,
+  "default_port": null,
   "default_username": "",
   "executable": "firestore-plugin",
   "capabilities": {
@@ -13,7 +13,7 @@
     "routines": false,
     "file_based": false,
     "folder_based": false,
-    "no_connection_required": false,
+    "no_connection_required": true,
     "identifier_quote": "\"",
     "alter_primary_key": false,
     "alter_column": false,
@@ -21,18 +21,20 @@
     "manage_tables": false,
     "readonly": true
   },
+  "settings": [
+    { "key": "project_id", "label": "GCP Project ID", "type": "string", "required": true },
+    { "key": "database_id", "label": "Database ID", "type": "string", "default": "(default)" },
+    { "key": "service_account_path", "label": "Service Account JSON Path", "type": "string",
+      "description": "Optional. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or gcloud ADC." },
+    { "key": "emulator_host", "label": "Firestore Emulator Host", "type": "string",
+      "description": "Optional. e.g. localhost:8080. Overrides production endpoint." },
+    { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number", "default": 50 }
+  ],
   "data_types": [
-    {
-      "name": "INTEGER",
-      "category": "numeric",
-      "requires_length": false,
-      "requires_precision": false
-    },
-    {
-      "name": "TEXT",
-      "category": "string",
-      "requires_length": false,
-      "requires_precision": false
-    }
+    { "name": "TEXT",      "category": "string",  "requires_length": false, "requires_precision": false },
+    { "name": "INTEGER",   "category": "numeric", "requires_length": false, "requires_precision": false },
+    { "name": "REAL",      "category": "numeric", "requires_length": false, "requires_precision": false },
+    { "name": "BOOLEAN",   "category": "other",   "requires_length": false, "requires_precision": false },
+    { "name": "TIMESTAMP", "category": "date",    "requires_length": false, "requires_precision": false }
   ]
 }

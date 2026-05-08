@@ -4,13 +4,12 @@ use serde_json::{json, Value};
 
 use crate::handlers;
 
-/// Parse one JSON-RPC line and return the response value (serialised
-/// downstream by `main.rs`). Never panics — parse errors and method
-/// failures are surfaced as JSON-RPC error responses.
-pub fn handle_line(line: &str) -> Value {
+pub async fn handle_line(line: &str) -> Value {
     let request: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(err) => return error_response(Value::Null, -32700, &format!("parse error: {err}")),
+        Err(err) => {
+            return error_response(Value::Null, -32700, &format!("parse error: {err}"), None)
+        }
     };
 
     let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -22,15 +21,14 @@ pub fn handle_line(line: &str) -> Value {
     let params = request.get("params").cloned().unwrap_or(Value::Null);
 
     match method.as_str() {
-        "initialize" => ok_response(id, Value::Null),
-        "ping" => ok_response(id, Value::Null),
-        "test_connection" => handlers::query::test_connection(id, &params),
+        "initialize" => handlers::query::initialize(id, &params).await,
+        "ping" => handlers::query::ping(id, &params).await,
+        "test_connection" => handlers::query::test_connection(id, &params).await,
 
-        // Metadata — return empty arrays so the driver loads cleanly.
-        "get_databases" => handlers::metadata::get_databases(id, &params),
+        "get_databases" => handlers::metadata::get_databases(id, &params).await,
         "get_schemas" => handlers::metadata::get_schemas(id, &params),
-        "get_tables" => handlers::metadata::get_tables(id, &params),
-        "get_columns" => handlers::metadata::get_columns(id, &params),
+        "get_tables" => handlers::metadata::get_tables(id, &params).await,
+        "get_columns" => handlers::metadata::get_columns(id, &params).await,
         "get_foreign_keys" => handlers::metadata::get_foreign_keys(id, &params),
         "get_indexes" => handlers::metadata::get_indexes(id, &params),
         "get_views" => handlers::metadata::get_views(id, &params),
@@ -43,19 +41,15 @@ pub fn handle_line(line: &str) -> Value {
         "get_all_columns_batch" => handlers::metadata::get_all_columns_batch(id, &params),
         "get_all_foreign_keys_batch" => handlers::metadata::get_all_foreign_keys_batch(id, &params),
 
-        // View mutation — not implemented by default.
         "create_view" | "alter_view" | "drop_view" => not_implemented(id, &method),
 
-        // Query execution — critical but needs a real driver.
-        "execute_query" => handlers::query::execute_query(id, &params),
+        "execute_query" => handlers::query::execute_query(id, &params).await,
         "explain_query" => handlers::query::explain_query(id, &params),
 
-        // CRUD.
         "insert_record" => handlers::crud::insert_record(id, &params),
         "update_record" => handlers::crud::update_record(id, &params),
         "delete_record" => handlers::crud::delete_record(id, &params),
 
-        // DDL.
         "get_create_table_sql" => handlers::ddl::get_create_table_sql(id, &params),
         "get_add_column_sql" => handlers::ddl::get_add_column_sql(id, &params),
         "get_alter_column_sql" => handlers::ddl::get_alter_column_sql(id, &params),
@@ -76,10 +70,14 @@ pub fn ok_response(id: Value, result: Value) -> Value {
     })
 }
 
-pub fn error_response(id: Value, code: i64, message: &str) -> Value {
+pub fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> Value {
+    let mut error = json!({ "code": code, "message": message });
+    if let Some(d) = data {
+        error["data"] = d;
+    }
     json!({
         "jsonrpc": "2.0",
-        "error": { "code": code, "message": message },
+        "error": error,
         "id": id,
     })
 }
@@ -89,5 +87,6 @@ pub fn not_implemented(id: Value, method: &str) -> Value {
         id,
         -32601,
         &format!("method '{method}' is not implemented by this plugin yet"),
+        None,
     )
 }
