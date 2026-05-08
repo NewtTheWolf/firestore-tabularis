@@ -38,7 +38,7 @@ pub async fn handle_line(line: &str) -> Value {
         "get_routine_parameters" => handlers::metadata::get_routine_parameters(id, &params),
         "get_routine_definition" => handlers::metadata::get_routine_definition(id, &params),
         "get_schema_snapshot" => handlers::metadata::get_schema_snapshot(id, &params),
-        "get_all_columns_batch" => handlers::metadata::get_all_columns_batch(id, &params),
+        "get_all_columns_batch" => handlers::metadata::get_all_columns_batch(id, &params).await,
         "get_all_foreign_keys_batch" => handlers::metadata::get_all_foreign_keys_batch(id, &params),
 
         "create_view" | "alter_view" | "drop_view" => not_implemented(id, &method),

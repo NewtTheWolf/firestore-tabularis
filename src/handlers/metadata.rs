@@ -148,9 +148,84 @@ pub fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
     )
 }
 
-pub fn get_all_columns_batch(id: Value, _params: &Value) -> Value {
-    ok_response(id, json!({}))
+pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
+    let tables: Vec<String> = params
+        .get("tables")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if tables.is_empty() {
+        return ok_response(id, json!({}));
+    }
+
+    let mut result: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut to_fetch: Vec<String> = Vec::new();
+    {
+        let cache = crate::state::SCHEMA_CACHE.read().unwrap();
+        for table in &tables {
+            if let Some(cols) = cache.get(table) {
+                let json_cols: Vec<Value> = cols.iter().map(|c| c.to_json()).collect();
+                result.insert(table.clone(), Value::Array(json_cols));
+            } else {
+                to_fetch.push(table.clone());
+            }
+        }
+    }
+
+    if !to_fetch.is_empty() {
+        let db = match resolve_client(id.clone()).await {
+            Ok(db) => db,
+            Err(resp) => return resp,
+        };
+        let n = crate::state::settings().map(|s| s.sample_size).unwrap_or(50);
+
+        let fetches = to_fetch.into_iter().map(|table| async move {
+            let docs: Vec<firestore::FirestoreDocument> = db
+                .fluent()
+                .select()
+                .from(table.as_str())
+                .limit(n)
+                .query()
+                .await
+                .unwrap_or_default();
+            let sample: Vec<crate::schema_infer::DocumentTypes> = docs
+                .iter()
+                .map(crate::schema_infer::types_from_document)
+                .collect();
+            (table, crate::schema_infer::infer(&sample))
+        });
+
+        let fetched = futures::future::join_all(fetches).await;
+        let mut cache = crate::state::SCHEMA_CACHE.write().unwrap();
+        for (table, columns) in fetched {
+            let json_cols: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
+            result.insert(table.clone(), Value::Array(json_cols));
+            cache.insert(table, columns);
+        }
+    }
+
+    ok_response(id, Value::Object(result))
 }
-pub fn get_all_foreign_keys_batch(id: Value, _params: &Value) -> Value {
-    ok_response(id, json!({}))
+
+pub fn get_all_foreign_keys_batch(id: Value, params: &Value) -> Value {
+    let tables: Vec<String> = params
+        .get("tables")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut result = serde_json::Map::new();
+    for t in tables {
+        result.insert(t, json!([]));
+    }
+    ok_response(id, Value::Object(result))
 }
