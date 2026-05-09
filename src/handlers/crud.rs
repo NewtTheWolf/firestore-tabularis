@@ -109,16 +109,6 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
     let col_name = col_name.to_string();
     let new_val = params.get("new_val").cloned().unwrap_or(Value::Null);
 
-    if col_name == crate::schema_infer::ID_COLUMN {
-        return error_response(
-            id,
-            -32602,
-            "Cannot rename document ID via update — Firestore doesn't support \
-             in-place doc-id changes. Delete + re-insert with the new id instead.",
-            None,
-        );
-    }
-
     let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
@@ -127,6 +117,10 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
         Some(s) => s,
         None => return error_response(id, -32602, "plugin not initialised", None),
     };
+
+    if col_name == crate::schema_infer::ID_COLUMN {
+        return rename_document(id, db, &table, &pk_val, &new_val).await;
+    }
 
     // Build a single-field document and tell Firestore to update only that field.
     let mut single_field = HashMap::new();
@@ -213,6 +207,99 @@ fn column_hint(table: &str, col_name: &str) -> Option<String> {
         .iter()
         .find(|c| c.name == col_name)
         .map(|c| c.data_type.clone())
+}
+
+/// Firestore doesn't support in-place document-id renames, but the user
+/// expectation is "I edited the id cell, save it." Implement that as a
+/// best-effort read→create-at-new-id→delete-old sequence.
+///
+/// Caveats (returned to the caller as warnings would be ideal but Tabularis'
+/// update_record contract is `Result<u64, String>` — no warning channel):
+///   - Non-atomic: if the create succeeds and the delete fails, the user
+///     ends up with a duplicate doc at both ids. Failure is rare (network
+///     blip mid-rename) and the user can clean up manually.
+///   - Subcollections under the source doc are NOT moved — they stay
+///     orphaned under the now-deleted parent path. Phase 4 will surface
+///     this as a UI confirmation when subcollections are detected.
+///   - Reference fields in OTHER docs pointing at the old id keep pointing
+///     at it — they go stale. No global rewrite (would require a full scan).
+async fn rename_document(
+    id: Value,
+    db: &firestore::FirestoreDb,
+    table: &str,
+    old_id: &str,
+    new_val: &Value,
+) -> Value {
+    let new_id = match new_val.as_str().filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => {
+            return error_response(
+                id,
+                -32602,
+                "renaming an id requires a non-empty string. To clear the id, \
+                 delete the document instead.",
+                None,
+            )
+        }
+    };
+
+    if new_id == old_id {
+        // No-op — same id. Idempotent: report success without doing work.
+        return ok_response(id, json!(1u64));
+    }
+
+    use firestore::{FirestoreCreateSupport, FirestoreDeleteSupport, FirestoreGetByIdSupport};
+
+    let source = match db.get_doc(table, old_id, None).await {
+        Ok(d) => d,
+        Err(e) => {
+            let (code, msg, data) = crate::firestore_error::map_error(&e);
+            return error_response(id, code, &msg, data);
+        }
+    };
+
+    if db.get_doc(table, new_id, None).await.is_ok() {
+        return error_response(
+            id,
+            -32602,
+            &format!(
+                "Cannot rename to '{new_id}': a document with that id already \
+                 exists. Pick a different id or delete the existing one first."
+            ),
+            None,
+        );
+    }
+
+    let new_doc = firestore::FirestoreDocument {
+        name: String::new(),
+        fields: source.fields,
+        create_time: None,
+        update_time: None,
+    };
+    if let Err(e) = db
+        .create_doc::<&str>(table, Some(new_id), new_doc, None)
+        .await
+    {
+        let (code, msg, data) = crate::firestore_error::map_error(&e);
+        return error_response(id, code, &msg, data);
+    }
+
+    if let Err(e) = db.delete_by_id(table, old_id, None).await {
+        let (code, msg, data) = crate::firestore_error::map_error(&e);
+        return error_response(
+            id,
+            code,
+            &format!(
+                "Renamed copy created at '{new_id}' but failed to delete the \
+                 source at '{old_id}': {msg}. You now have both — delete one \
+                 manually."
+            ),
+            data,
+        );
+    }
+
+    crate::state::invalidate_table_caches(table);
+    ok_response(id, json!(1u64))
 }
 
 /// Validate that every column declared `is_nullable=false` (other than the

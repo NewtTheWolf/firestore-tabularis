@@ -229,8 +229,13 @@ SECTION C — PHASE 3: CRUD (write access) — generic / `advisors`
 -- ☐ C3) Delete: select row(s), Del key (or context menu).
 --      Verify total_count decrements.
 --
--- ☐ C4) Try editing the synthetic `id` column. Should be rejected with a
---      structured error explaining "delete + re-insert with the new id".
+-- ☐ C4) Edit the synthetic `id` column. Plugin runs read+create+delete in
+--      the background so the doc effectively renames. New cell value
+--      becomes the new doc-id; the old slot is freed.
+--      Edge cases (handled with structured errors):
+--        - empty new value → reject ("delete the doc instead")
+--        - new id already exists → reject ("pick a different id")
+--        - same id → idempotent no-op
 --
 -- ☐ C5) Insert without an `id` field. Firestore should auto-generate one;
 --      the response should include the new id; the row appears.
