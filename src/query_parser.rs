@@ -82,6 +82,22 @@ pub enum Literal {
 
 pub fn parse(sql: &str) -> Result<ParsedQuery, String> {
     let tokens = tokenize(sql)?;
+    // Friendly errors for DML statements that route through other RPC methods
+    // — the Console tab fires execute_query for whatever SQL is typed, but
+    // INSERT/UPDATE/DELETE go through insert_record/update_record/delete_record
+    // (driven by the table-tab edit UI). Surface the right path instead of
+    // letting the user wonder why a literal-looking SQL statement fails.
+    if let Some(Token::Word(first)) = tokens.first() {
+        let upper = first.to_uppercase();
+        if matches!(upper.as_str(), "INSERT" | "UPDATE" | "DELETE") {
+            return Err(format!(
+                "{upper} via SQL is not supported by the Firestore plugin. \
+                 Open the table tab and use the grid's row-edit UI \
+                 (insert / edit / delete buttons) — those route to the \
+                 plugin's structured CRUD handlers and respect schema overrides."
+            ));
+        }
+    }
     let mut p = Parser { tokens, pos: 0 };
     let q = p.parse_select()?;
     p.expect_end()?;
@@ -1018,6 +1034,25 @@ mod tests {
         let err = parse(r#"SELECT * FROM "u" WHERE FOO_BAR(x)"#).unwrap_err();
         assert!(err.contains("unknown function"), "got: {err}");
         assert!(err.contains("FOO_BAR"));
+    }
+
+    #[test]
+    fn dml_insert_returns_friendly_redirect() {
+        let err = parse("INSERT INTO test SET id = 'abc'").unwrap_err();
+        assert!(err.contains("INSERT"));
+        assert!(err.contains("table tab"));
+    }
+
+    #[test]
+    fn dml_update_returns_friendly_redirect() {
+        let err = parse("UPDATE test SET col = 'v' WHERE id = 'a'").unwrap_err();
+        assert!(err.contains("UPDATE"));
+    }
+
+    #[test]
+    fn dml_delete_returns_friendly_redirect() {
+        let err = parse("DELETE FROM test WHERE id = 'a'").unwrap_err();
+        assert!(err.contains("DELETE"));
     }
 
     #[test]

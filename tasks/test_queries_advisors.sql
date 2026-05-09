@@ -303,5 +303,143 @@ SECTION F — ERROR HANDLING
 -- ✗ F5) update_record on `id` column
 --      Expect: -32602 with delete + re-insert guidance
 --
--- ✗ F6) delete_record without pkVal
---      Expect: -32602 missing 'pkVal' parameter
+-- ✗ F6) delete_record without pk_val
+--      Expect: -32602 missing 'pk_val' parameter
+
+-- ✗ F7) DML statement in Console tab — friendly redirect, not parser noise.
+INSERT INTO test SET id = 'abc';
+--      Expect: -32602 "INSERT via SQL is not supported … use the table tab".
+UPDATE test SET test = 'x' WHERE id = 'abc';
+--      Expect: same shape, "UPDATE via SQL is not supported …".
+DELETE FROM test WHERE id = 'abc';
+--      Expect: same shape, "DELETE via SQL is not supported …".
+
+===============================================================================
+SECTION G — `test` COLLECTION + SCHEMA OVERRIDES (luninora-dev)
+===============================================================================
+
+-- This section validates the schema-overrides feature against the `test`
+-- collection on luninora-dev. The override file at
+-- ~/firestore-schemas/luninora-dev.json declares:
+--
+--   { "test":  { "required": true,  "type": "string", "comment": "Hauptfeld" } }
+--   { "test2": { "required": false, "type": "string", "comment": "Optionales Zweitfeld" } }
+--
+-- Prerequisite: in Tabularis Plugin-Settings, set
+--   "Schema Overrides Directory" = /home/newt/firestore-schemas
+-- then restart Tabularis (not just toggle — plugin process needs respawn).
+
+-------------------------------------------------------------------------------
+-- G1. Schema introspection
+-------------------------------------------------------------------------------
+
+-- ☐ G1) Open the `test` collection in Tabularis. The column inspector / form
+--      should show:
+--        id     → required (synthetic), comment "Firestore document ID"
+--        test   → required, comment "Hauptfeld der Test-Collection"
+--        test2  → optional, comment "Optionales Zweitfeld"
+--      If `test` shows up as optional, the override file is not loaded.
+--      Check the schema_overrides_dir setting + Tabularis restart.
+
+-- ☐ G2) ER diagram view: `test` should appear with the same column shape.
+--       (No FKs because no `reference` fields.)
+
+-------------------------------------------------------------------------------
+-- G2. Read-back queries (Phase 2 sanity check on this collection)
+-------------------------------------------------------------------------------
+
+-- ✓ G3) Plain SELECT
+SELECT * FROM "test" LIMIT 10;
+
+-- ✓ G4) Filter by required field
+SELECT * FROM "test" WHERE test = 'placeholder' LIMIT 5;
+
+-- ✓ G5) Filter by doc-id (synthetic id rewrite)
+SELECT * FROM "test" WHERE id = 'plugin-required-test';
+
+-- ✓ G6) Projection of just the required field
+SELECT id, test FROM "test" LIMIT 5;
+
+-------------------------------------------------------------------------------
+-- G3. CRUD via UI — required-field validation
+-------------------------------------------------------------------------------
+
+-- ☐ G7) Open the `test` table tab. Click "+" to insert a new row. Fill ONLY
+--      the `id` field (e.g. "g7-test"), leave `test` empty, submit.
+--      Expect: error in the modal:
+--        "Insert failed: Required field(s) not set: test. The plugin's schema
+--         declares these as is_nullable=false (likely via your schema-overrides
+--         file). Fill them in or mark the field optional in the override."
+--      The modal should NOT close. The doc should NOT be created. (Verify
+--      with G3 → no g7-test row.)
+--
+-- ☐ G8) Same form, now fill `test` = "ok", leave test2 empty, submit.
+--      Expect: success, modal closes, row appears in grid.
+--      total_count for the collection bumps by 1.
+--
+-- ☐ G9) Insert with all three fields:
+--      id="g9-test", test="primary", test2="secondary"
+--      Expect: success.
+--
+-- ☐ G10) Edit the inserted row's `test` field, change to "updated", blur.
+--      Expect: persisted; refresh shows "updated".
+--
+-- ☐ G11) Try to clear the required `test` field (set to empty string). The
+--      cell save MIGHT fall through (Tabularis upstream issue: NewRowModal-
+--      style required-validation isn't re-enforced on cell-edit). Document
+--      what you observe — this is a known limitation.
+--
+-- ☐ G12) Delete both rows (g8 + g9). total_count back to baseline.
+
+-------------------------------------------------------------------------------
+-- G4. Override-file edits (no restart needed for the file itself, but
+--     Tabularis caches column metadata until reconnect)
+-------------------------------------------------------------------------------
+
+-- ☐ G13) Edit ~/firestore-schemas/luninora-dev.json — flip `test` to
+--      "required": false. Save.
+--
+-- ☐ G14) Toggle the connection in Tabularis (disconnect → reconnect).
+--      Open `test` table again.
+--      Expect: column inspector now shows `test` as optional.
+--
+-- ☐ G15) Insert with only `id`. Now SUCCEEDS (no required-field error).
+--
+-- ☐ G16) Revert the override file back to required. Reconnect. Verify G7
+--      again returns the error.
+
+-------------------------------------------------------------------------------
+-- G5. Override edge cases
+-------------------------------------------------------------------------------
+
+-- ☐ G17) Type override: in the override file, set test2.type = "number".
+--      Reconnect. The grid should now treat test2 as numeric (input
+--      validation, sort order). Existing string values become "mixed" or
+--      coerce on display.
+--
+-- ☐ G18) Hidden field: add `"hidden": true` to test2 in the override.
+--      Reconnect. test2 disappears from the grid entirely.
+--
+-- ☐ G19) Extra field: declare `extra_fields.notes` with type=string,
+--      comment="Freitext". Reconnect. The grid shows a `notes` column even
+--      though no doc has that field. Insert a row that fills `notes` —
+--      verify it round-trips.
+
+-------------------------------------------------------------------------------
+-- G6. CLI smoke for the override pipeline
+-------------------------------------------------------------------------------
+
+-- Reproducible from the terminal (bypasses Tabularis entirely):
+--
+--   {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"settings":{"project_id":"luninora-dev","database_id":"(default)","sample_size":50,"schema_overrides_dir":"/home/newt/firestore-schemas"}}}
+--   {"jsonrpc":"2.0","id":2,"method":"get_columns","params":{"table":"test"}}
+--      → expect 3 columns: id (is_pk:true), test (is_nullable:false, comment "Hauptfeld..."), test2 (is_nullable:true)
+--
+--   {"jsonrpc":"2.0","id":3,"method":"insert_record","params":{"table":"test","data":{"id":"cli-only"}}}
+--      → expect: {"error":{"code":-32602,"message":"Required field(s) not set: test. ..."}}
+--
+--   {"jsonrpc":"2.0","id":4,"method":"insert_record","params":{"table":"test","data":{"id":"cli-only","test":"hello"}}}
+--      → expect: {"result":1}
+--
+--   {"jsonrpc":"2.0","id":5,"method":"delete_record","params":{"table":"test","pk_col":"id","pk_val":"cli-only"}}
+--      → expect: {"result":1}
