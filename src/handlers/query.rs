@@ -734,3 +734,281 @@ pub(crate) fn canonical_order_by(items: &[crate::query_parser::OrderItem]) -> St
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_parser::{CmpOp, FilterExpr, Literal, OrderItem};
+    use crate::schema_infer::ColumnInfo;
+    use gcloud_sdk::google::firestore::v1::value::ValueType;
+    use gcloud_sdk::google::firestore::v1::{
+        ArrayValue, MapValue, Value as ProtoValue,
+    };
+
+    fn proto_str(s: &str) -> ProtoValue {
+        ProtoValue {
+            value_type: Some(ValueType::StringValue(s.into())),
+        }
+    }
+
+    fn proto_int(n: i64) -> ProtoValue {
+        ProtoValue {
+            value_type: Some(ValueType::IntegerValue(n)),
+        }
+    }
+
+    fn col(name: &str, data_type: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            data_type: data_type.into(),
+            is_nullable: true,
+            references: None,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn doc_short_id_takes_last_segment() {
+        let doc = firestore::FirestoreDocument {
+            name: "projects/p/databases/(default)/documents/users/abc123".into(),
+            fields: std::collections::HashMap::new(),
+            create_time: None,
+            update_time: None,
+        };
+        assert_eq!(doc_short_id(&doc), "abc123");
+    }
+
+    #[test]
+    fn doc_short_id_handles_empty_name() {
+        let doc = firestore::FirestoreDocument {
+            name: String::new(),
+            fields: std::collections::HashMap::new(),
+            create_time: None,
+            update_time: None,
+        };
+        assert_eq!(doc_short_id(&doc), "");
+    }
+
+    #[test]
+    fn serialize_value_null() {
+        let v = ProtoValue {
+            value_type: Some(ValueType::NullValue(0)),
+        };
+        assert_eq!(serialize_value(&v), Value::Null);
+    }
+
+    #[test]
+    fn serialize_value_bool_int_double_string() {
+        assert_eq!(
+            serialize_value(&ProtoValue {
+                value_type: Some(ValueType::BooleanValue(true)),
+            }),
+            Value::Bool(true)
+        );
+        assert_eq!(serialize_value(&proto_int(42)), json!(42));
+        assert_eq!(
+            serialize_value(&ProtoValue {
+                value_type: Some(ValueType::DoubleValue(2.5)),
+            }),
+            json!(2.5)
+        );
+        assert_eq!(serialize_value(&proto_str("hello")), json!("hello"));
+    }
+
+    #[test]
+    fn serialize_value_timestamp_emits_rfc3339() {
+        let v = ProtoValue {
+            value_type: Some(ValueType::TimestampValue(
+                gcloud_sdk::prost_types::Timestamp {
+                    seconds: 1_778_322_600,
+                    nanos: 0,
+                },
+            )),
+        };
+        let s = serialize_value(&v);
+        assert!(s.as_str().unwrap().starts_with("2026-05-09T10:30:00"));
+    }
+
+    #[test]
+    fn serialize_value_array_emits_json_string() {
+        let v = ProtoValue {
+            value_type: Some(ValueType::ArrayValue(ArrayValue {
+                values: vec![proto_str("a"), proto_str("b")],
+            })),
+        };
+        // Phase-2 quirk: arrays are JSON-stringified for Tabularis grid hover.
+        assert_eq!(serialize_value(&v), json!("[\"a\",\"b\"]"));
+    }
+
+    #[test]
+    fn serialize_value_map_emits_json_string() {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("k".to_string(), proto_int(7));
+        let v = ProtoValue {
+            value_type: Some(ValueType::MapValue(MapValue { fields })),
+        };
+        assert_eq!(serialize_value(&v), json!("{\"k\":7}"));
+    }
+
+    #[test]
+    fn serialize_value_reference_passes_through() {
+        let v = ProtoValue {
+            value_type: Some(ValueType::ReferenceValue(
+                "projects/p/databases/(default)/documents/users/abc".into(),
+            )),
+        };
+        assert_eq!(
+            serialize_value(&v),
+            json!("projects/p/databases/(default)/documents/users/abc")
+        );
+    }
+
+    #[test]
+    fn to_firestore_order_maps_directions() {
+        let items = vec![
+            OrderItem {
+                field: "createdAt".into(),
+                desc: true,
+            },
+            OrderItem {
+                field: "name".into(),
+                desc: false,
+            },
+        ];
+        let mapped = to_firestore_order(&items);
+        assert_eq!(mapped.len(), 2);
+        assert_eq!(mapped[0].0, "createdAt");
+        assert_eq!(mapped[1].0, "name");
+        assert!(matches!(
+            mapped[0].1,
+            firestore::FirestoreQueryDirection::Descending
+        ));
+        assert!(matches!(
+            mapped[1].1,
+            firestore::FirestoreQueryDirection::Ascending
+        ));
+    }
+
+    #[test]
+    fn to_firestore_order_empty_input() {
+        assert!(to_firestore_order(&[]).is_empty());
+    }
+
+    #[test]
+    fn project_columns_keeps_only_requested() {
+        let names = vec!["id".into(), "email".into(), "rating".into()];
+        let rows = vec![json!(["abc", "x@y.de", 5])];
+        let (cols, rows) = project_columns(&names, &rows, &["email".into()]);
+        assert_eq!(cols, vec!["email"]);
+        assert_eq!(rows, vec![json!(["x@y.de"])]);
+    }
+
+    #[test]
+    fn project_columns_keeps_unknown_with_null_fill() {
+        let names = vec!["id".into(), "email".into()];
+        let rows = vec![json!(["abc", "x@y.de"])];
+        let (cols, rows) = project_columns(&names, &rows, &["id".into(), "missing".into()]);
+        assert_eq!(cols, vec!["id", "missing"]);
+        assert_eq!(rows, vec![json!(["abc", null])]);
+    }
+
+    #[test]
+    fn project_columns_preserves_order() {
+        let names = vec!["a".into(), "b".into(), "c".into()];
+        let rows = vec![json!([1, 2, 3])];
+        let (cols, rows) = project_columns(&names, &rows, &["c".into(), "a".into()]);
+        assert_eq!(cols, vec!["c", "a"]);
+        assert_eq!(rows, vec![json!([3, 1])]);
+    }
+
+    #[test]
+    fn canonical_order_by_formats() {
+        let items = vec![
+            OrderItem {
+                field: "x".into(),
+                desc: false,
+            },
+            OrderItem {
+                field: "y".into(),
+                desc: true,
+            },
+        ];
+        assert_eq!(canonical_order_by(&items), "x ASC, y DESC");
+    }
+
+    #[test]
+    fn canonical_order_by_empty() {
+        assert_eq!(canonical_order_by(&[]), "");
+    }
+
+    #[test]
+    fn canonical_filter_eq() {
+        let f = FilterExpr::Compare {
+            field: vec!["status".into()],
+            op: CmpOp::Eq,
+            value: Literal::Str("active".into()),
+        };
+        let s = canonical_filter(&f);
+        assert!(s.contains("status"));
+        assert!(s.contains("active"));
+    }
+
+    #[test]
+    fn canonical_filter_and_is_deterministic() {
+        // Same logical expression in different argument orders should canonicalise
+        // to the same string — that's what makes it usable as a cache key.
+        let f1 = FilterExpr::And(vec![
+            FilterExpr::Compare {
+                field: vec!["a".into()],
+                op: CmpOp::Eq,
+                value: Literal::Int(1),
+            },
+            FilterExpr::Compare {
+                field: vec!["b".into()],
+                op: CmpOp::Eq,
+                value: Literal::Int(2),
+            },
+        ]);
+        let f2 = FilterExpr::And(vec![
+            FilterExpr::Compare {
+                field: vec!["b".into()],
+                op: CmpOp::Eq,
+                value: Literal::Int(2),
+            },
+            FilterExpr::Compare {
+                field: vec!["a".into()],
+                op: CmpOp::Eq,
+                value: Literal::Int(1),
+            },
+        ]);
+        assert_eq!(canonical_filter(&f1), canonical_filter(&f2));
+    }
+
+    #[test]
+    fn serialize_row_includes_id_first() {
+        let cols = vec![col("id", "string"), col("email", "string")];
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("email".into(), proto_str("x@y.de"));
+        let doc = firestore::FirestoreDocument {
+            name: "projects/p/databases/(default)/documents/test/abc".into(),
+            fields,
+            create_time: None,
+            update_time: None,
+        };
+        let row = serialize_row(&doc, &cols);
+        assert_eq!(row, json!(["abc", "x@y.de"]));
+    }
+
+    #[test]
+    fn serialize_row_fills_missing_with_null() {
+        let cols = vec![col("id", "string"), col("missing", "string")];
+        let doc = firestore::FirestoreDocument {
+            name: "projects/p/databases/(default)/documents/test/abc".into(),
+            fields: std::collections::HashMap::new(),
+            create_time: None,
+            update_time: None,
+        };
+        let row = serialize_row(&doc, &cols);
+        assert_eq!(row, json!(["abc", null]));
+    }
+}

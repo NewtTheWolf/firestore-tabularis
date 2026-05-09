@@ -31,3 +31,34 @@ impl fmt::Display for PluginError {
 }
 
 impl std::error::Error for PluginError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_uses_jsonrpc_internal_code() {
+        let e = PluginError::internal("boom");
+        assert_eq!(e.code, -32603);
+        assert_eq!(e.message, "boom");
+    }
+
+    #[test]
+    fn invalid_params_uses_jsonrpc_invalid_params_code() {
+        let e = PluginError::invalid_params("missing x");
+        assert_eq!(e.code, -32602);
+    }
+
+    #[test]
+    fn display_format_includes_code() {
+        let e = PluginError::internal("bad");
+        assert_eq!(format!("{e}"), "[-32603] bad");
+    }
+
+    #[test]
+    fn implements_std_error_trait() {
+        fn assert_err<E: std::error::Error>(_: &E) {}
+        let e = PluginError::internal("x");
+        assert_err(&e);
+    }
+}
