@@ -17,6 +17,48 @@ release: build-ui
 test:
     cargo test
 
+# Coverage report (region-level via cargo-llvm-cov).
+cov:
+    cargo llvm-cov --summary-only
+
+# ---------------------------------------------------------------------------
+# Firestore emulator orchestration (bun + firebase-tools).
+# Java (JRE 11+) is required by the underlying emulator.
+# ---------------------------------------------------------------------------
+
+# Install bun deps (firebase-tools).
+[unix]
+emulator-deps:
+    @command -v bun >/dev/null || { echo "Install bun first: curl -fsSL https://bun.sh/install | bash"; exit 1; }
+    bun install --silent
+
+# Self-contained: random free port, fresh firebase.json, seed, run integration
+# tests, clean up. Picks Java 21 explicitly (firebase-tools v15+ requirement;
+# default-java may be older). Used both for local dev and CI.
+[unix]
+test-integration: emulator-deps
+    @bash -c 'set -euo pipefail; \
+        export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}; \
+        export PATH=$JAVA_HOME/bin:$PATH; \
+        PORT=$(bun run tests/fixtures/free-port.ts); \
+        echo "[it] picked port $PORT"; \
+        cp firebase.json firebase.json.bak; \
+        printf "{\"emulators\":{\"firestore\":{\"host\":\"127.0.0.1\",\"port\":%s},\"ui\":{\"enabled\":false},\"singleProjectMode\":true}}\n" "$PORT" > firebase.json; \
+        cleanup() { kill $EMU_PID 2>/dev/null || true; mv firebase.json.bak firebase.json; }; \
+        trap cleanup EXIT; \
+        bun run emulator > /tmp/firestore-it.log 2>&1 & \
+        EMU_PID=$!; \
+        echo "[it] emulator pid=$EMU_PID, waiting for :$PORT..."; \
+        for i in $(seq 1 60); do \
+            if curl -fsS http://127.0.0.1:$PORT >/dev/null 2>&1; then echo "[it] ready after ${i}s"; break; fi; \
+            if ! kill -0 $EMU_PID 2>/dev/null; then echo "[it] emulator died early — log:"; tail -30 /tmp/firestore-it.log; exit 1; fi; \
+            sleep 1; \
+        done; \
+        FIRESTORE_EMULATOR_HOST=127.0.0.1:$PORT bun run emulator:seed; \
+        FIRESTORE_EMULATOR_HOST=127.0.0.1:$PORT \
+        FIRESTORE_TEST_PROJECT=demo-project \
+        cargo test --test firestore_emulator -- --ignored --test-threads=1'
+
 # Launch the local REPL that simulates Tabularis JSON-RPC calls over stdio.
 repl:
     cargo run --bin test_plugin

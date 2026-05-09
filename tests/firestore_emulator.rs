@@ -177,17 +177,306 @@ fn phase2_query_layer_against_emulator() {
         "pagination should produce disjoint pages: {q5a} {q5b}"
     );
 
-    // get_schema_snapshot — posts.author should reference users
+    // get_schema_snapshot — posts.author should reference users.
+    // Tabularis expects Vec<TableSchema> (verified in src-tauri plugin bridge).
     let snap = p.call("get_schema_snapshot", json!({ "params": {} }));
-    let fks = &snap["result"]["foreign_keys"]["posts"];
-    assert!(fks.is_array(), "expected posts foreign_keys array: {snap}");
-    let fk_to_users = fks
-        .as_array()
-        .unwrap()
+    let tables = snap["result"].as_array().expect("snapshot is an array");
+    let posts = tables
         .iter()
-        .find(|fk| fk["from_column"] == "author" && fk["to_table"] == "users");
+        .find(|t| t["name"] == "posts")
+        .expect("posts in snapshot");
+    let fks = posts["foreign_keys"]
+        .as_array()
+        .expect("posts foreign_keys");
+    let fk_to_users = fks
+        .iter()
+        .find(|fk| fk["column_name"] == "author" && fk["ref_table"] == "users");
     assert!(
         fk_to_users.is_some(),
         "expected posts.author -> users FK: {snap}"
     );
+}
+
+#[test]
+#[ignore]
+fn phase3_crud_against_emulator() {
+    let host = emulator_host().expect("FIRESTORE_EMULATOR_HOST not set");
+    let project =
+        std::env::var("FIRESTORE_TEST_PROJECT").unwrap_or_else(|_| "demo-project".to_string());
+
+    let mut p = Plugin::spawn();
+
+    let init = p.call(
+        "initialize",
+        json!({
+            "settings": { "project_id": project, "emulator_host": host, "sample_size": 50 }
+        }),
+    );
+    assert!(init.get("error").is_none(), "initialize: {init}");
+
+    // Prime the column cache so insert validation has schema to consult.
+    let _ = p.call("get_columns", json!({ "table": "users" }));
+
+    // Insert with explicit id.
+    let ins = p.call(
+        "insert_record",
+        json!({
+            "table": "users",
+            "data": { "id": "crud-test-doc", "email": "crud@x.de", "active": true }
+        }),
+    );
+    assert_eq!(ins["result"], json!(1u64), "insert: {ins}");
+
+    // Read-back roundtrip — bool/string preserved.
+    let q = p.call(
+        "execute_query",
+        json!({
+            "params": {},
+            "query": "SELECT id, email, active FROM \"users\" WHERE id = 'crud-test-doc'"
+        }),
+    );
+    let row = q["result"]["rows"][0].as_array().unwrap();
+    assert_eq!(row[0], json!("crud-test-doc"));
+    assert_eq!(row[1], json!("crud@x.de"));
+    assert_eq!(row[2], json!(true));
+
+    // Update single field.
+    let upd = p.call(
+        "update_record",
+        json!({
+            "table": "users",
+            "pk_col": "id",
+            "pk_val": "crud-test-doc",
+            "col_name": "email",
+            "new_val": "updated@x.de",
+        }),
+    );
+    assert_eq!(upd["result"], json!(1u64), "update: {upd}");
+
+    let q2 = p.call(
+        "execute_query",
+        json!({
+            "params": {},
+            "query": "SELECT email FROM \"users\" WHERE id = 'crud-test-doc'"
+        }),
+    );
+    assert_eq!(q2["result"]["rows"][0][0], json!("updated@x.de"));
+
+    // Update on the synthetic id triggers the rename pattern.
+    let rename = p.call(
+        "update_record",
+        json!({
+            "table": "users",
+            "pk_col": "id",
+            "pk_val": "crud-test-doc",
+            "col_name": "id",
+            "new_val": "crud-test-renamed",
+        }),
+    );
+    assert_eq!(rename["result"], json!(1u64), "rename: {rename}");
+
+    let q3 = p.call(
+        "execute_query",
+        json!({
+            "params": {},
+            "query": "SELECT id, email FROM \"users\" WHERE id IN ('crud-test-doc', 'crud-test-renamed')"
+        }),
+    );
+    let rows3 = q3["result"]["rows"].as_array().unwrap();
+    assert_eq!(rows3.len(), 1, "exactly one doc after rename: {q3}");
+    assert_eq!(rows3[0][0], json!("crud-test-renamed"));
+    assert_eq!(rows3[0][1], json!("updated@x.de"));
+
+    // Cleanup.
+    let del = p.call(
+        "delete_record",
+        json!({
+            "table": "users",
+            "pk_col": "id",
+            "pk_val": "crud-test-renamed",
+        }),
+    );
+    assert_eq!(del["result"], json!(1u64), "delete: {del}");
+}
+
+#[test]
+#[ignore]
+fn rename_collision_returns_structured_error() {
+    let host = emulator_host().expect("FIRESTORE_EMULATOR_HOST not set");
+    let project =
+        std::env::var("FIRESTORE_TEST_PROJECT").unwrap_or_else(|_| "demo-project".to_string());
+
+    let mut p = Plugin::spawn();
+    let _ = p.call(
+        "initialize",
+        json!({"settings": { "project_id": project, "emulator_host": host, "sample_size": 50 }}),
+    );
+
+    // Try to rename alice → bob (both seeded). Must fail with -32602.
+    let r = p.call(
+        "update_record",
+        json!({
+            "table": "users",
+            "pk_col": "id",
+            "pk_val": "alice",
+            "col_name": "id",
+            "new_val": "bob",
+        }),
+    );
+    assert_eq!(r["error"]["code"], json!(-32602), "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists"),
+        "{r}"
+    );
+}
+
+#[test]
+#[ignore]
+fn auto_generated_doc_id_when_id_omitted() {
+    let host = emulator_host().expect("FIRESTORE_EMULATOR_HOST not set");
+    let project =
+        std::env::var("FIRESTORE_TEST_PROJECT").unwrap_or_else(|_| "demo-project".to_string());
+
+    let mut p = Plugin::spawn();
+    let _ = p.call(
+        "initialize",
+        json!({"settings": { "project_id": project, "emulator_host": host, "sample_size": 50 }}),
+    );
+
+    // Insert with no `id` field — Firestore should auto-generate.
+    let ins = p.call(
+        "insert_record",
+        json!({
+            "table": "users",
+            "data": { "email": "autogen@x.de", "active": true }
+        }),
+    );
+    assert_eq!(ins["result"], json!(1u64), "{ins}");
+
+    // Find the generated doc to clean up.
+    let q = p.call(
+        "execute_query",
+        json!({
+            "params": {},
+            "query": "SELECT id FROM \"users\" WHERE email = 'autogen@x.de'"
+        }),
+    );
+    let id = q["result"]["rows"][0][0]
+        .as_str()
+        .expect("autogen id should be a string")
+        .to_string();
+    assert!(!id.is_empty());
+    assert_ne!(id, "alice");
+    assert_ne!(id, "bob");
+
+    let _ = p.call(
+        "delete_record",
+        json!({"table": "users", "pk_col": "id", "pk_val": id}),
+    );
+}
+
+#[test]
+#[ignore]
+fn explain_plan_shape_matches_tabularis_contract() {
+    let host = emulator_host().expect("FIRESTORE_EMULATOR_HOST not set");
+    let project =
+        std::env::var("FIRESTORE_TEST_PROJECT").unwrap_or_else(|_| "demo-project".to_string());
+
+    let mut p = Plugin::spawn();
+    let _ = p.call(
+        "initialize",
+        json!({"settings": { "project_id": project, "emulator_host": host, "sample_size": 50 }}),
+    );
+
+    let r = p.call(
+        "explain_query",
+        json!({
+            "params": {},
+            "query": "SELECT * FROM \"users\" LIMIT 5",
+            "analyze": true,
+        }),
+    );
+    let plan = &r["result"];
+    let root = &plan["root"];
+    // Shape contract — these are what Tabularis' deserializer checks for.
+    // The Firestore emulator doesn't always return execution_stats even with
+    // analyze=true (emulator-vs-production gap), so don't assert on
+    // has_analyze_data / actual_rows here — verify the wire shape only.
+    assert!(root.is_object(), "root is required: {r}");
+    assert_eq!(root["relation"], json!("users"));
+    assert!(root["extra"].is_object());
+    assert!(root["children"].is_array());
+    assert_eq!(plan["driver"], json!("firestore"));
+    assert!(plan["has_analyze_data"].is_boolean());
+    assert!(plan["original_query"].as_str().unwrap().contains("users"));
+    let extra = root["extra"].as_object().unwrap();
+    assert!(extra.contains_key("documents_scanned"));
+    assert!(extra.contains_key("limit"));
+}
+
+#[test]
+#[ignore]
+fn schema_overrides_required_field_blocks_insert() {
+    use std::io::Write;
+    let host = emulator_host().expect("FIRESTORE_EMULATOR_HOST not set");
+    let project =
+        std::env::var("FIRESTORE_TEST_PROJECT").unwrap_or_else(|_| "demo-project".to_string());
+
+    let dir = std::env::temp_dir().join("firestore-plugin-it-schemas");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut f = std::fs::File::create(dir.join(format!("{project}.json"))).unwrap();
+    writeln!(
+        f,
+        r#"{{"collections":{{"users":{{"fields":{{"region":{{"required":true}}}}}}}}}}"#
+    )
+    .unwrap();
+
+    let mut p = Plugin::spawn();
+    let _ = p.call(
+        "initialize",
+        json!({"settings": {
+            "project_id": project,
+            "emulator_host": host,
+            "sample_size": 50,
+            "schema_overrides_dir": dir.to_str().unwrap(),
+        }}),
+    );
+    let _ = p.call("get_columns", json!({ "table": "users" }));
+
+    // Insert without `region` — should fail per the override.
+    let ins = p.call(
+        "insert_record",
+        json!({
+            "table": "users",
+            "data": { "id": "override-test", "email": "ot@x.de" }
+        }),
+    );
+    assert_eq!(ins["error"]["code"], json!(-32602), "{ins}");
+    assert!(
+        ins["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("region"),
+        "{ins}"
+    );
+
+    // With region — should succeed; clean up.
+    let ok = p.call(
+        "insert_record",
+        json!({
+            "table": "users",
+            "data": { "id": "override-test", "email": "ot@x.de", "region": "eu" }
+        }),
+    );
+    assert_eq!(ok["result"], json!(1u64));
+    let _ = p.call(
+        "delete_record",
+        json!({"table": "users", "pk_col": "id", "pk_val": "override-test"}),
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

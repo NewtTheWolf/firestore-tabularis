@@ -1,0 +1,14 @@
+{
+  "name": "firestore-plugin-emulator",
+  "private": true,
+  "type": "module",
+  "description": "Firestore emulator orchestration + seeding for the Tabularis plugin's integration tests.",
+  "scripts": {
+    "emulator": "firebase emulators:start --only firestore --project demo-project",
+    "emulator:seed": "FIRESTORE_EMULATOR_HOST=${FIRESTORE_EMULATOR_HOST:-localhost:8080} bun run tests/fixtures/seed.ts",
+    "emulator:reset": "curl -fsSX DELETE \"http://${FIRESTORE_EMULATOR_HOST:-localhost:8080}/emulator/v1/projects/demo-project/databases/(default)/documents\""
+  },
+  "devDependencies": {
+    "firebase-tools": "^15.17.0"
+  }
+}

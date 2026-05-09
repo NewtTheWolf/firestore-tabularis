@@ -1,2 +1,10 @@
 target/
 .claude/worktrees/
+
+# Emulator workspace
+node_modules/
+bun.lockb
+bun.lock
+firebase-debug.log
+firestore-debug.log
+.firebase/
