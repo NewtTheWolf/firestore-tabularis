@@ -78,13 +78,9 @@ pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec
     let mut types_by_field: BTreeMap<String, BTreeSet<FieldType>> = BTreeMap::new();
     let mut reference_targets_by_field: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-    let total = sample.len();
-    let mut seen_count: BTreeMap<String, usize> = BTreeMap::new();
-
     for doc in sample {
         for (k, t) in doc {
             types_by_field.entry(k.clone()).or_default().insert(*t);
-            *seen_count.entry(k.clone()).or_insert(0) += 1;
         }
     }
 
@@ -101,9 +97,7 @@ pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec
         if name == ID_COLUMN {
             continue;
         }
-        let (data_type, has_null) = classify_set(&types);
-        let missing = seen_count.get(&name).is_none_or(|&c| c < total);
-        let is_nullable = has_null || missing;
+        let (data_type, _has_null) = classify_set(&types);
         let references = reference_targets_by_field.get(&name).and_then(|targets| {
             if targets.len() == 1 {
                 targets.iter().next().cloned()
@@ -111,10 +105,16 @@ pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec
                 None
             }
         });
+        // Firestore is schemaless: any field may be absent in any document.
+        // The sample-based "present in all sampled docs" signal is interesting
+        // but does NOT amount to a required-ness constraint. Reporting
+        // is_nullable=false here would make Tabularis block saves on fields
+        // that Firestore would happily accept as missing — a UX bug rooted in
+        // a relational-DB assumption that doesn't apply.
         out.push(ColumnInfo {
             name,
             data_type,
-            is_nullable,
+            is_nullable: true,
             references,
         });
     }
@@ -242,7 +242,8 @@ mod tests {
         );
         assert_eq!(cols[1].data_type, "number");
         assert_eq!(cols[2].data_type, "string");
-        assert!(!cols[1].is_nullable);
+        // All non-id fields are nullable in Firestore — no schema enforcement.
+        assert!(cols[1].is_nullable);
     }
 
     #[test]
@@ -280,16 +281,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_field_in_some_docs_marks_nullable() {
+    fn all_non_id_fields_report_nullable() {
+        // Firestore is schemaless. Even a field present in 100% of sampled
+        // docs may legitimately be omitted from a future doc — Tabularis must
+        // not block save on its absence.
         let sample = vec![
             doc(&[("name", FieldType::String), ("nickname", FieldType::String)]),
             doc(&[("name", FieldType::String)]),
         ];
         let cols = infer(&sample, &[]);
-        let name = cols.iter().find(|c| c.name == "name").unwrap();
-        let nickname = cols.iter().find(|c| c.name == "nickname").unwrap();
-        assert!(!name.is_nullable);
-        assert!(nickname.is_nullable);
+        for col in &cols {
+            if col.name == ID_COLUMN {
+                continue;
+            }
+            assert!(col.is_nullable, "{} should be nullable", col.name);
+        }
     }
 
     #[test]
