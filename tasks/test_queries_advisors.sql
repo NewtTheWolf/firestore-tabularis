@@ -7,6 +7,17 @@
 --
 -- Coverage status as of 2026-05-09: Phases 1, 2, 3 all shipped.
 --
+-- WHICH SECTION USES WHICH COLLECTION:
+--   A — `advisors` (rich schema → exercises every Phase-2 query feature)
+--   B — generic UI walkthrough (any collection, but uses advisors-style fields)
+--   C — generic CRUD via UI (covers shape; for the focused test-collection
+--        equivalent that exercises required-field validation, see SECTION G)
+--   D — `advisors` (rich field types → exercises coercion round-trips that
+--        the simple `test` collection can't reach with just two strings)
+--   E — generic JSON-RPC protocol (collection-agnostic)
+--   F — generic error handling (collection-agnostic)
+--   G — `test` collection + schema-overrides validation (added 2026-05-09)
+--
 -- Legend
 --   ✓ expected to succeed
 --   ✗ expected to fail with a specific, structured error (validation/index)
@@ -176,10 +187,12 @@ SELECT id, firstName, lastName, rating FROM "advisors"
   ORDER BY rating DESC LIMIT 5;
 
 ===============================================================================
-SECTION B — TABULARIS UI INTERACTIONS (manual, not SQL)
+SECTION B — TABULARIS UI INTERACTIONS (manual, not SQL) — generic
 ===============================================================================
 
 -- These aren't queries — exercise them by clicking in the Tabularis UI.
+-- Items here are collection-agnostic; pick `advisors` for richest output
+-- or `test` if you want to validate quickly.
 
 -- ☐ B1) Open the connection. Sidebar should list all root collections,
 --       sorted alphabetically.
@@ -196,9 +209,14 @@ SECTION B — TABULARIS UI INTERACTIONS (manual, not SQL)
 --       include a clickable Firebase Console URL.
 
 ===============================================================================
-SECTION C — PHASE 3: CRUD (write access)
+SECTION C — PHASE 3: CRUD (write access) — generic / `advisors`
 ===============================================================================
 
+-- For the smaller, faster `test` collection variant of these checks —
+-- including required-field validation through schema overrides — see
+-- SECTION G (G7-G12). C is the broader pass against `advisors` to verify
+-- the same paths cope with rich field types.
+--
 -- The grid is now editable. To exercise CRUD via the UI:
 --
 -- ☐ C1) Insert: click "+" in the grid toolbar, fill form, submit.
@@ -239,9 +257,12 @@ SECTION C — PHASE 3: CRUD (write access)
 -- Expected: id 7 returns rows: [], total_count: 0.
 
 ===============================================================================
-SECTION D — TYPE COERCION (Phase 3 — exercise via UI grid)
+SECTION D — TYPE COERCION (Phase 3 — exercise via UI grid) — `advisors`
 ===============================================================================
 
+-- These checks need rich field types (timestamp / map / array / reference)
+-- which the simple `test` collection doesn't have. Stay on `advisors`.
+--
 -- Each row below is a write that should round-trip through coercion.rs
 -- and come back identical when re-read. Use a disposable advisor doc
 -- (e.g. `firestore-plugin-coercion-test`) to keep prod data clean.
@@ -269,9 +290,10 @@ SECTION D — TYPE COERCION (Phase 3 — exercise via UI grid)
 --      expect: ReferenceValue (link clickable in grid)
 
 ===============================================================================
-SECTION E — JSON-RPC PROTOCOL CORRECTNESS
+SECTION E — JSON-RPC PROTOCOL CORRECTNESS — collection-agnostic
 ===============================================================================
 
+-- Pure protocol behaviour. Use `ping` so no connection setup is needed.
 -- Run via raw stdin pipe; verify response counts.
 
 -- ☐ E1) Notification (no `id` field) — MUST receive zero responses.
@@ -284,7 +306,7 @@ SECTION E — JSON-RPC PROTOCOL CORRECTNESS
 --      echo '{"jsonrpc":"2.0","id":42,"method":"ping","params":{}}' | ./firestore-plugin
 
 ===============================================================================
-SECTION F — ERROR HANDLING
+SECTION F — ERROR HANDLING — collection-agnostic
 ===============================================================================
 
 -- ✗ F1) Unparseable JSON
