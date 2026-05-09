@@ -199,47 +199,37 @@ pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
         }
     }
 
-    // Assemble the response envelope.
-    let mut tables_json: Vec<Value> = Vec::new();
-    let mut columns_json = serde_json::Map::new();
-    let mut foreign_keys_json = serde_json::Map::new();
-
-    for (table, columns) in fetched {
-        tables_json.push(json!({
-            "name": table,
-            "schema": Value::Null,
-            "comment": Value::Null
-        }));
-        let cols_arr: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
-        columns_json.insert(table.clone(), Value::Array(cols_arr));
-
-        let fks: Vec<Value> = columns
-            .iter()
-            .filter_map(|c| {
-                c.references.as_ref().map(|target| {
-                    json!({
-                        "from_column": c.name.clone(),
-                        "to_table": target.clone(),
-                        "to_column": crate::schema_infer::ID_COLUMN
+    // Tabularis' plugin-driver bridge expects `Vec<TableSchema>`:
+    //   [{ name, columns: TableColumn[], foreign_keys: ForeignKey[] }, ...]
+    // (verified in src-tauri/src/plugins/driver.rs:606 and types/editor.ts).
+    // Each ForeignKey is { name, column_name, ref_table, ref_column }.
+    let mut tables_out: Vec<Value> = fetched
+        .into_iter()
+        .map(|(table, columns)| {
+            let cols_arr: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
+            let fks: Vec<Value> = columns
+                .iter()
+                .filter_map(|c| {
+                    c.references.as_ref().map(|target| {
+                        json!({
+                            "name": format!("fk_{}_{}", table, c.name),
+                            "column_name": c.name.clone(),
+                            "ref_table": target.clone(),
+                            "ref_column": crate::schema_infer::ID_COLUMN,
+                        })
                     })
                 })
+                .collect();
+            json!({
+                "name": table,
+                "columns": cols_arr,
+                "foreign_keys": fks,
             })
-            .collect();
-        if !fks.is_empty() {
-            foreign_keys_json.insert(table, Value::Array(fks));
-        }
-    }
+        })
+        .collect();
+    tables_out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-    tables_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-
-    ok_response(
-        id,
-        json!({
-            "tables": tables_json,
-            "columns": Value::Object(columns_json),
-            "foreign_keys": Value::Object(foreign_keys_json)
-        }),
-    )
+    ok_response(id, Value::Array(tables_out))
 }
 
 pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {

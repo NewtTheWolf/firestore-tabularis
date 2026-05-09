@@ -484,6 +484,7 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let analyze = params.get("analyze").and_then(Value::as_bool).unwrap_or(false);
     let mut parsed = match crate::query_parser::parse(&sql) {
         Ok(p) => p,
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
@@ -514,10 +515,14 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         q = q.limit(n as u32);
     }
 
-    // Enable explain mode (sets explain_options on the query params).
-    // The explain metrics are returned in the metadata of the last stream item.
+    // analyze=true tells Firestore to actually run the query and return
+    // execution stats; false returns the plan only.
+    let explain_opts = firestore::FirestoreExplainOptions::new().with_analyze(analyze);
     let started = std::time::Instant::now();
-    let stream_result = q.explain().stream_query_with_metadata().await;
+    let stream_result = q
+        .explain_with_options(explain_opts)
+        .stream_query_with_metadata()
+        .await;
     let elapsed = started.elapsed().as_millis() as u64;
 
     let stream = match stream_result {
@@ -574,29 +579,68 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
             (0, 0, 0)
         };
 
-    // Build a human-readable plan_text.
-    let plan_text = format!(
-        "table={} filter={} order_by=[{}] limit={:?} indexes_used={}",
-        parsed.table,
-        parsed
-            .where_clause
-            .as_ref()
-            .map(canonical_filter)
-            .unwrap_or_else(|| "(none)".to_string()),
-        canonical_order_by(&parsed.order_by),
-        parsed.limit,
-        indexes_used,
+    // Tabularis (src/types/explain.ts) expects a single-root tree:
+    //   ExplainPlan { root: ExplainNode, planning_time_ms, execution_time_ms,
+    //                 original_query, driver, has_analyze_data, raw_output }
+    // Firestore's plan is a flat blob of stats, not a tree, so we emit one
+    // root node carrying the table as `relation`, the result count as
+    // `actual_rows`, the duration as `actual_time_ms`, and stuff the
+    // Firestore-specific stats (read_operations, indexes_used) in `extra`
+    // for the visualizer to surface.
+    let has_analyze = explain_metrics
+        .and_then(|m| m.execution_stats.as_ref())
+        .is_some();
+
+    let mut extra = serde_json::Map::new();
+    extra.insert("documents_scanned".into(), json!(read_operations));
+    extra.insert(
+        "index_used".into(),
+        json!(!indexes_used
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true)),
     );
+    extra.insert("indexes_used".into(), indexes_used);
+    if let Some(filter) = parsed.where_clause.as_ref() {
+        extra.insert("filter_canonical".into(), json!(canonical_filter(filter)));
+    }
+    if !parsed.order_by.is_empty() {
+        extra.insert("order_by".into(), json!(canonical_order_by(&parsed.order_by)));
+    }
+    if let Some(n) = parsed.limit {
+        extra.insert("limit".into(), json!(n));
+    }
+
+    let root = json!({
+        "id": "firestore-root",
+        "node_type": "Firestore Query",
+        "relation": parsed.table,
+        "startup_cost": Value::Null,
+        "total_cost": Value::Null,
+        "plan_rows": Value::Null,
+        "actual_rows": if has_analyze { json!(results_returned) } else { Value::Null },
+        "actual_time_ms": if has_analyze { json!(execution_duration_ms) } else { Value::Null },
+        "actual_loops": Value::Null,
+        "buffers_hit": Value::Null,
+        "buffers_read": Value::Null,
+        "filter": Value::Null,
+        "index_condition": Value::Null,
+        "join_type": Value::Null,
+        "hash_condition": Value::Null,
+        "extra": Value::Object(extra),
+        "children": Value::Array(vec![]),
+    });
 
     crate::rpc::ok_response(
         id,
         json!({
-            "plan_text": plan_text,
-            "documents_returned": results_returned,
-            "documents_scanned": read_operations,
-            "index_used": !indexes_used.as_array().map(|a| a.is_empty()).unwrap_or(true),
-            "indexes_used": indexes_used,
-            "execution_duration_ms": execution_duration_ms,
+            "root": root,
+            "planning_time_ms": Value::Null,
+            "execution_time_ms": if has_analyze { json!(execution_duration_ms) } else { Value::Null },
+            "original_query": sql,
+            "driver": "firestore",
+            "has_analyze_data": has_analyze,
+            "raw_output": Value::Null,
             "elapsed_ms": elapsed,
         }),
     )
