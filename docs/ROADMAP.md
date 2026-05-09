@@ -8,7 +8,7 @@ This file tracks the planned evolution of the firestore Tabularis plugin. Phase 
 |---|---|---|
 | 1 — Read-only MVP | ✅ shipped 2026-05-08 | [`specs/2026-05-08-phase-1-firestore-read-only-driver-design.md`](specs/2026-05-08-phase-1-firestore-read-only-driver-design.md) |
 | 2 — Query layer + Map polish | ✅ shipped 2026-05-08 | [`specs/2026-05-08-phase-2-firestore-query-layer-design.md`](specs/2026-05-08-phase-2-firestore-query-layer-design.md) |
-| 3 — CRUD | not started | TBD |
+| 3 — CRUD | ✅ shipped 2026-05-09 | (no spec doc — implemented from review-driven plan, see `tasks/todo.md` history) |
 | 4 — Multi-DB + Subcollections + Auth UX | not started | TBD |
 | 5 — Release & distribution | not started | TBD |
 
@@ -43,13 +43,13 @@ The biggest UX hebel after Phase 1. Turns the plugin from "data browser" into "d
 
 ---
 
-## Phase 3 — CRUD (write access)
+## Phase 3 — CRUD ✅ shipped 2026-05-09
 
-- `insert_record`, `update_record`, `delete_record` via firestore-rs fluent API
-- `capabilities.readonly: false` so Tabularis exposes the inline-edit UI
-- Type coercion from Tabularis edit-cell values back into Firestore proto types (the inverse of Phase 1's `serialize_value`)
-- Optimistic concurrency: should we honor `update_time` precondition? Spec call-out, decide during Phase 3 brainstorm.
-- `manage_tables` decision: do we map "Create Table" to "Create Collection"? Firestore creates collections implicitly on first doc write — DDL is largely meaningless. Probable answer: leave DDL `not_implemented` and document why.
+Shipped: `insert_record` (explicit-id or server-side autogen), `update_record` (single-field via `update_only`, rejects `colName=='id'` because Firestore has no in-place doc rename), `delete_record`. New `coercion.rs` module is the inverse of `query::serialize_value`: edit-cell JSON → Firestore proto value, hinted by the inferred schema's `data_type` (timestamps parse RFC3339, references emit ReferenceValue, array/map strings JSON-parse because Phase 2 ships them stringified). All three handlers invalidate COUNT_CACHE + CURSOR_CACHE for the touched table. Manifest flipped to `readonly: false`.
+
+Decisions taken:
+- **Optimistic concurrency** — not honored. Tabularis doesn't surface `update_time`; last writer wins. Revisit if multi-user scenarios bite.
+- **DDL** — stays `not_implemented`. Firestore creates collections implicitly on first doc write; mapping "Create Collection" to anything meaningful would be theatre. Documented in handlers/ddl.rs.
 
 ---
 
