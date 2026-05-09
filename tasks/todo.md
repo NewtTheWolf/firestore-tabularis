@@ -2,6 +2,13 @@
 
 Plain index of stuff we want to come back to. Each entry is one line; if something needs design, link to a spec under `docs/superpowers/specs/`.
 
+## Next-session priorities (decided 2026-05-09)
+
+1. **`sqlparser` migration** (see Parser section below) — biggest leverage; unlocks DML SQL in the Console tab and reduces parser maintenance.
+2. **Test coverage push toward ~100%** — pick the path the migration leaves cleanest: with `sqlparser` swapping the front end, the remaining gaps are mostly `handlers/metadata.rs` (consider `trait FirestoreOps` + `mockall`) and `state.rs` (cache invalidation tests).
+3. **Phase 4** — multi-DB / subcollections / auth UX / live-mode listener (parked items below).
+
+
 ## Upstream (Tabularis core)
 
 - [ ] **File Tabularis issue: NewRowModal silently drops empty required fields** — `src/components/modals/NewRowModal.tsx:195` skips fields where `rawVal === "" && !col.is_nullable` instead of blocking submit. Relational drivers happen to fail later via NOT NULL constraint, but schemaless drivers (Firestore) just accept the partial doc. Fix: HTML5 `required` attribute + client-side pre-submit check. Plugin workaround already in `handlers/crud.rs::find_missing_required_fields`, but server-roundtrip-validated UX is worse than client-side. Repo: `TabularisDB/tabularis`.
