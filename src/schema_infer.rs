@@ -61,7 +61,7 @@ impl ColumnInfo {
             "is_nullable": self.is_nullable,
             "default_value": Value::Null,
             "is_pk": self.name == ID_COLUMN,
-            "is_auto_increment": false,
+            "is_auto_increment": self.name == ID_COLUMN,
             "character_maximum_length": Value::Null,
             "comment": self
                 .comment
