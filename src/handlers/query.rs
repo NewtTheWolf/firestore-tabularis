@@ -76,21 +76,8 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
 
-    if let (Some(filter), Some(settings)) = (parsed.where_clause.as_mut(), crate::state::settings())
-    {
-        crate::firestore_filter::rewrite_doc_id(
-            filter,
-            &parsed.table,
-            &settings.project_id,
-            &settings.database_id,
-        );
-    }
-
-    // Pre-flight Firestore restriction validation (before any I/O).
-    if let Some(filter) = &parsed.where_clause {
-        if let Err(msg) = crate::firestore_filter::validate(filter) {
-            return crate::rpc::error_response(id, -32602, &msg, None);
-        }
+    if let Err(resp) = prepare_filter(&mut parsed, &id) {
+        return resp;
     }
 
     // Resolve effective limit/offset: params.page/page_size override SQL.
@@ -103,25 +90,12 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         _ => parsed.offset.unwrap_or(0),
     };
 
-    let db = match resolve_client(id.clone()).await {
+    let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
 
-    let order_items: Vec<(String, firestore::FirestoreQueryDirection)> = parsed
-        .order_by
-        .iter()
-        .map(|i| {
-            (
-                i.field.clone(),
-                if i.desc {
-                    firestore::FirestoreQueryDirection::Descending
-                } else {
-                    firestore::FirestoreQueryDirection::Ascending
-                },
-            )
-        })
-        .collect();
+    let order_items = to_firestore_order(&parsed.order_by);
 
     let mut q = db.fluent().select().from(parsed.table.as_str());
 
@@ -148,16 +122,30 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         order_by_canonical: canonical_order_by(&parsed.order_by),
     };
 
-    // Look up a cached cursor for this offset (write lock required — TtlLruCache::get is &mut).
-    let cursor_doc: Option<firestore::FirestoreDocument> = if effective_offset > 0 {
-        crate::state::CURSOR_CACHE
-            .write()
-            .unwrap()
-            .get(&query_key)
-            .and_then(|entry| entry.cursors.get(&effective_offset).cloned())
-    } else {
-        None
-    };
+    // Look up a cached cursor for this offset. If the exact offset isn't
+    // cached, fall back to the largest cursor ≤ offset and apply the remainder
+    // as a Firestore-side OFFSET. This is still cheaper than scanning from
+    // zero, as long as the user paginates roughly forward.
+    let (cursor_doc, residual_offset): (Option<firestore::FirestoreDocument>, u64) =
+        if effective_offset > 0 {
+            let mut cache = crate::state::lock_cursor_cache();
+            match cache.get(&query_key) {
+                Some(entry) => {
+                    if let Some(doc) = entry.cursors.get(&effective_offset) {
+                        (Some(doc.clone()), 0)
+                    } else if let Some((cursor_off, doc)) =
+                        entry.cursors.range(..effective_offset).next_back()
+                    {
+                        (Some(doc.clone()), effective_offset - cursor_off)
+                    } else {
+                        (None, effective_offset)
+                    }
+                }
+                None => (None, effective_offset),
+            }
+        } else {
+            (None, 0)
+        };
 
     if let Some(ref doc) = cursor_doc {
         // Build AfterValue cursor from the last document of the previous page.
@@ -187,9 +175,13 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
                 .collect()
         };
         q = q.start_at(firestore::FirestoreQueryCursor::AfterValue(cursor_values));
+        if residual_offset > 0 {
+            // Cursor was approximate — apply the remaining gap as OFFSET.
+            q = q.offset(residual_offset.min(u32::MAX as u64) as u32);
+        }
     } else if effective_offset > 0 {
         // No cursor cached — fall back to OFFSET (skip).
-        q = q.offset(effective_offset as u32);
+        q = q.offset(effective_offset.min(u32::MAX as u64) as u32);
     }
 
     // Build cache key for count.
@@ -202,18 +194,26 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             .unwrap_or_default(),
     };
 
-    let cached_count: Option<u64> = crate::state::COUNT_CACHE
-        .write()
-        .unwrap()
+    let cached_count: Option<u64> = crate::state::lock_count_cache()
         .get(&count_key)
         .copied();
 
     let started = std::time::Instant::now();
 
+    // Run a fresh COUNT only when (a) we don't have a cached value AND (b) the
+    // caller is on page 1 (offset == 0). For later pages the total hasn't
+    // changed since page 1; running an unconditional aggregation would double
+    // the Firestore reads with no observable benefit.
+    let should_count = cached_count.is_none() && effective_offset == 0;
+
     let (docs_result, count_result) = if let Some(c) = cached_count {
-        // Cache hit — only run the data query.
         let d = q.query().await;
         (d, Ok(Some(c)))
+    } else if !should_count {
+        // Page 2+ with cold cache: skip count entirely, fall back to rows.len()
+        // when assembling total_count below.
+        let d = q.query().await;
+        (d, Ok(None))
     } else {
         // Build a separate count query with the same filter (no order/limit/offset).
         let mut count_q = db.fluent().select().from(parsed.table.as_str());
@@ -226,7 +226,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             .query();
         let (docs_res, agg_res) = tokio::join!(q.query(), count_fut);
         // Extract the count integer from the aggregation result document.
-        // Returns Ok(Some(n)) on success, Ok(None) if the shape is unexpected,
+        // Ok(Some(n)) on success, Ok(None) if the shape is unexpected,
         // or Err if the Firestore RPC itself failed.
         let count_res: Result<Option<u64>, firestore::errors::FirestoreError> = match agg_res {
             Ok(docs) => {
@@ -260,7 +260,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
     // Update cursor cache: store the last doc as the cursor for the next page offset.
     if let Some(last_doc) = docs.last() {
         let next_offset = effective_offset + docs.len() as u64;
-        let mut cache = crate::state::CURSOR_CACHE.write().unwrap();
+        let mut cache = crate::state::lock_cursor_cache();
         // Clone existing cursors (if any) before re-borrowing for insert.
         let existing_cursors = cache.get(&query_key).map(|e| e.cursors.clone());
         let mut cursors = existing_cursors.unwrap_or_default();
@@ -270,10 +270,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     let total_count: u64 = match count_result {
         Ok(Some(n)) => {
-            crate::state::COUNT_CACHE
-                .write()
-                .unwrap()
-                .insert(count_key, n);
+            crate::state::lock_count_cache().insert(count_key, n);
             n
         }
         Ok(None) => {
@@ -290,11 +287,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         }
     };
 
-    let columns = match crate::state::SCHEMA_CACHE
-        .read()
-        .unwrap()
-        .get(&parsed.table)
-    {
+    let columns = match crate::state::schema_cache_read().get(&parsed.table) {
         Some(c) => c.clone(),
         None => {
             // Infer on the fly (caller will hit the cache next time via get_columns).
@@ -309,6 +302,13 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
     let column_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
     let rows: Vec<Value> = docs.iter().map(|d| serialize_row(d, &columns)).collect();
 
+    // Client-side projection: Firestore has no server-side field selection,
+    // so we filter the columns + slice each row after the docs come back.
+    let (column_names, rows) = match &parsed.columns {
+        Some(requested) => project_columns(&column_names, &rows, requested),
+        None => (column_names, rows),
+    };
+
     ok_response(
         id,
         json!({
@@ -319,6 +319,36 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
             "execution_time_ms": elapsed,
         }),
     )
+}
+
+/// Filter the result set to only the columns named in the SELECT clause.
+/// Requested columns missing from the inferred schema are kept in the output
+/// with `null` values — schema inference is sample-based, so a column the user
+/// asks for may be absent in the sample but present in some documents.
+fn project_columns(
+    all_names: &[String],
+    all_rows: &[Value],
+    requested: &[String],
+) -> (Vec<String>, Vec<Value>) {
+    let indices: Vec<Option<usize>> = requested
+        .iter()
+        .map(|r| all_names.iter().position(|n| n == r))
+        .collect();
+    let rows: Vec<Value> = all_rows
+        .iter()
+        .map(|row| {
+            let arr = row.as_array().cloned().unwrap_or_default();
+            let projected: Vec<Value> = indices
+                .iter()
+                .map(|idx| {
+                    idx.and_then(|i| arr.get(i).cloned())
+                        .unwrap_or(Value::Null)
+                })
+                .collect();
+            Value::Array(projected)
+        })
+        .collect();
+    (requested.to_vec(), rows)
 }
 
 fn serialize_row(
@@ -391,19 +421,47 @@ fn error_from_query(id: Value, err: &firestore::errors::FirestoreError) -> Value
     crate::rpc::error_response(id, code, &msg, data)
 }
 
-async fn resolve_client(id: Value) -> Result<&'static firestore::FirestoreDb, Value> {
-    let Some(settings) = crate::state::settings() else {
-        return Err(crate::rpc::error_response(
-            id,
-            -32602,
-            "plugin not initialised",
-            None,
-        ));
-    };
-    crate::state::CLIENT
-        .get_or_try_init(|| async { crate::client::build(settings).await })
-        .await
-        .map_err(|err| crate::rpc::error_response(id.clone(), err.code, &err.message, None))
+/// Apply the doc-id rewrite + Firestore restriction validation. Returns a
+/// JSON-RPC error response if validation fails. Used by both `execute_query`
+/// and `explain_query` so the same WHERE clause behaviour is enforced in both.
+fn prepare_filter(
+    parsed: &mut crate::query_parser::ParsedQuery,
+    id: &Value,
+) -> Result<(), Value> {
+    if let (Some(filter), Some(settings)) = (parsed.where_clause.as_mut(), crate::state::settings())
+    {
+        crate::firestore_filter::rewrite_doc_id(
+            filter,
+            &parsed.table,
+            &settings.project_id,
+            &settings.database_id,
+        );
+    }
+    if let Some(filter) = &parsed.where_clause {
+        if let Err(msg) = crate::firestore_filter::validate(filter) {
+            return Err(crate::rpc::error_response(id.clone(), -32602, &msg, None));
+        }
+    }
+    Ok(())
+}
+
+/// Map our internal `OrderItem`s to the firestore-rs direction enum.
+fn to_firestore_order(
+    items: &[crate::query_parser::OrderItem],
+) -> Vec<(String, firestore::FirestoreQueryDirection)> {
+    items
+        .iter()
+        .map(|i| {
+            (
+                i.field.clone(),
+                if i.desc {
+                    firestore::FirestoreQueryDirection::Descending
+                } else {
+                    firestore::FirestoreQueryDirection::Ascending
+                },
+            )
+        })
+        .collect()
 }
 
 pub async fn explain_query(id: Value, params: &Value) -> Value {
@@ -417,26 +475,14 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
 
-    let db = match resolve_client(id.clone()).await {
+    if let Err(resp) = prepare_filter(&mut parsed, &id) {
+        return resp;
+    }
+
+    let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
-
-    if let (Some(filter), Some(settings)) = (parsed.where_clause.as_mut(), crate::state::settings())
-    {
-        crate::firestore_filter::rewrite_doc_id(
-            filter,
-            &parsed.table,
-            &settings.project_id,
-            &settings.database_id,
-        );
-    }
-
-    if let Some(filter) = &parsed.where_clause {
-        if let Err(msg) = crate::firestore_filter::validate(filter) {
-            return crate::rpc::error_response(id, -32602, &msg, None);
-        }
-    }
 
     let mut q = db.fluent().select().from(parsed.table.as_str());
 
@@ -445,21 +491,7 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         q = q.filter(move |_| Some(firestore_filter.clone()));
     }
 
-    let order_items: Vec<(String, firestore::FirestoreQueryDirection)> = parsed
-        .order_by
-        .iter()
-        .map(|i| {
-            (
-                i.field.clone(),
-                if i.desc {
-                    firestore::FirestoreQueryDirection::Descending
-                } else {
-                    firestore::FirestoreQueryDirection::Ascending
-                },
-            )
-        })
-        .collect();
-
+    let order_items = to_firestore_order(&parsed.order_by);
     if !order_items.is_empty() {
         q = q.order_by(order_items);
     }

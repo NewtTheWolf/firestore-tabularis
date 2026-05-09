@@ -1,11 +1,24 @@
-//! Hand-rolled parser for the Phase 1 query grammar:
-//!   SELECT * FROM <table> [WHERE ...] [ORDER BY field [ASC|DESC] (, field [ASC|DESC])*]
-//!                         [LIMIT n] [OFFSET n]
-//! Anything outside this grammar yields an error — Phase 2 expands the language.
+//! Hand-rolled parser for the Tabularis SQL subset we accept.
+//!
+//! Grammar (current):
+//!   SELECT (* | col [, col]*) FROM <table>
+//!     [WHERE <expr>]
+//!     [ORDER BY field [ASC|DESC] (, field [ASC|DESC])*]
+//!     [LIMIT n] [OFFSET n]
+//! WHERE supports AND/OR/NOT, parens, =/!=/&lt;/&lt;=/&gt;/&gt;=, IN/NOT IN, ARRAY_CONTAINS
+//! / ARRAY_CONTAINS_ANY (infix and function form), TIMESTAMP literals.
+//! Also unwraps `SELECT * FROM (<inner>) AS alias` because Tabularis Table-View
+//! emits that wrapper unconditionally.
+//!
+//! Replaced by the `sqlparser` crate when next Tabularis-side SQL surprise
+//! arrives — see `tasks/todo.md`.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedQuery {
     pub table: String,
+    /// `None` = `SELECT *`. `Some([...])` = explicit column list, projected
+    /// client-side after Firestore returns the full document.
+    pub columns: Option<Vec<String>>,
     pub where_clause: Option<FilterExpr>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<u64>,
@@ -85,15 +98,9 @@ enum Token {
     StringLit(String),
     LParen,
     RParen,
-    /// Negative integer or float literal (the leading `-` was consumed during number parsing).
-    #[allow(dead_code)]
-    NegNumber(u64),
     Op(CmpOp),
     /// Numeric literal that includes a fractional part.
     Float(f64),
-    /// Catch-all for unrecognised punctuation. The parser surfaces a clear error.
-    #[allow(dead_code)]
-    Symbol(char),
 }
 
 fn tokenize(sql: &str) -> Result<Vec<Token>, String> {
@@ -292,14 +299,92 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<ParsedQuery, String> {
         self.expect_keyword("SELECT")?;
-        match self.advance() {
-            Some(Token::Star) => {}
-            other => return Err(format!(
-                "Phase 1 supports only 'SELECT * FROM \"<collection>\" [ORDER BY field [ASC|DESC], ...] [LIMIT n] [OFFSET n]'. \
-                 Non-'*' select lists arrive in Phase 2. (got {:?})", other
-            )),
-        }
+        // Either `*` or a comma-separated identifier list (projected client-side
+        // after Firestore returns the full document).
+        let columns: Option<Vec<String>> = match self.peek() {
+            Some(Token::Star) => {
+                self.advance();
+                None
+            }
+            Some(Token::Word(_)) => {
+                let mut cols = Vec::new();
+                loop {
+                    match self.advance() {
+                        Some(Token::Word(w)) => cols.push(w),
+                        other => {
+                            return Err(format!("expected column name, got {:?}", other))
+                        }
+                    }
+                    match self.peek() {
+                        Some(Token::Comma) => {
+                            self.advance();
+                            continue;
+                        }
+                        _ => break,
+                    }
+                }
+                Some(cols)
+            }
+            other => {
+                return Err(format!(
+                    "expected '*' or column list after SELECT, got {:?}",
+                    other
+                ))
+            }
+        };
         self.expect_keyword("FROM")?;
+
+        // Tabularis Table-View wraps queries as
+        //   SELECT * FROM (SELECT * FROM <table> ... LIMIT n) AS limited_subset
+        // Detect the wrapper, parse the inner SELECT, and let any outer
+        // ORDER BY / LIMIT / OFFSET clauses override the inner ones.
+        if matches!(self.peek(), Some(Token::LParen)) {
+            self.advance();
+            let mut inner = self.parse_select()?;
+            // Outer projection overrides inner — Tabularis wraps with `SELECT *`
+            // but a custom outer column list should still win.
+            if columns.is_some() {
+                inner.columns = columns;
+            }
+            match self.advance() {
+                Some(Token::RParen) => {}
+                other => return Err(format!("expected ')' to close subquery, got {:?}", other)),
+            }
+            // Optional `AS <alias>` after the closing paren.
+            if let Some(Token::Word(w)) = self.peek() {
+                if w.eq_ignore_ascii_case("AS") {
+                    self.advance();
+                    match self.advance() {
+                        Some(Token::Word(_)) => {}
+                        other => return Err(format!("expected alias after AS, got {:?}", other)),
+                    }
+                }
+            }
+            // Outer ORDER BY / LIMIT / OFFSET override the inner clauses.
+            loop {
+                match self.peek() {
+                    Some(Token::Word(w)) if w.eq_ignore_ascii_case("ORDER") => {
+                        self.advance();
+                        self.expect_keyword("BY")?;
+                        inner.order_by = self.parse_order_items()?;
+                    }
+                    Some(Token::Word(w)) if w.eq_ignore_ascii_case("LIMIT") => {
+                        self.advance();
+                        inner.limit = Some(self.parse_uint("LIMIT")?);
+                    }
+                    Some(Token::Word(w)) if w.eq_ignore_ascii_case("OFFSET") => {
+                        self.advance();
+                        inner.offset = Some(self.parse_uint("OFFSET")?);
+                    }
+                    None => break,
+                    Some(other) => {
+                        return Err(format!("unexpected token after subquery: {:?}", other))
+                    }
+                }
+            }
+            return Ok(inner);
+        }
+
         let table = match self.advance() {
             Some(Token::Word(w)) => w,
             other => return Err(format!("expected table name after FROM, got {:?}", other)),
@@ -336,10 +421,13 @@ impl Parser {
                         || w.eq_ignore_ascii_case("HAVING") =>
                 {
                     return Err(format!(
-                        "Phase 1 supports only 'SELECT * FROM \"<collection>\" [ORDER BY field [ASC|DESC], ...] [LIMIT n] [OFFSET n]'. \
-                         '{}' arrives in Phase 2.", w.to_uppercase()
+                        "'{}' is not supported. Firestore has no joins or aggregations \
+                         in the storage engine — use the EXPLAIN button on a per-collection \
+                         query and post-process in your application.",
+                        w.to_uppercase()
                     ));
                 }
+                Some(Token::RParen) => break, // end of subquery — outer parser handles ')'
                 None => break,
                 Some(other) => return Err(format!("unexpected token: {:?}", other)),
             }
@@ -347,6 +435,7 @@ impl Parser {
 
         Ok(ParsedQuery {
             table,
+            columns,
             where_clause,
             order_by,
             limit,
@@ -509,6 +598,16 @@ impl Parser {
                     values,
                     negated: false,
                 });
+            }
+            if upper == "ARRAY_CONTAINS" {
+                self.advance();
+                let value = self.parse_literal()?;
+                return Ok(FilterExpr::ArrayContains { field, value });
+            }
+            if upper == "ARRAY_CONTAINS_ANY" {
+                self.advance();
+                let values = self.parse_value_list()?;
+                return Ok(FilterExpr::ArrayContainsAny { field, values });
             }
         }
 
@@ -697,25 +796,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_star_select_list() {
-        let err = parse(r#"SELECT name FROM "users""#).unwrap_err();
-        assert!(
-            err.contains("Phase 2"),
-            "expected Phase 2 message, got: {err}"
-        );
+    fn accepts_single_column_projection() {
+        let q = parse(r#"SELECT name FROM "users""#).unwrap();
+        assert_eq!(q.columns, Some(vec!["name".to_string()]));
     }
 
     #[test]
     fn rejects_join() {
         let err =
             parse(r#"SELECT * FROM "users" JOIN "posts" ON users.id = posts.user_id"#).unwrap_err();
-        assert!(err.contains("Phase 2"));
+        assert!(err.contains("JOIN"));
     }
 
     #[test]
     fn rejects_group_by() {
         let err = parse(r#"SELECT * FROM "users" GROUP BY country"#).unwrap_err();
-        assert!(err.contains("Phase 2"));
+        assert!(err.contains("GROUP"));
     }
 
     #[test]
@@ -922,5 +1018,88 @@ mod tests {
         let err = parse(r#"SELECT * FROM "u" WHERE FOO_BAR(x)"#).unwrap_err();
         assert!(err.contains("unknown function"), "got: {err}");
         assert!(err.contains("FOO_BAR"));
+    }
+
+    #[test]
+    fn unwraps_tabularis_limit_subquery() {
+        // Tabularis Table-View wraps queries this way for cross-driver pagination.
+        let q = parse(
+            r#"SELECT * FROM (SELECT * FROM "advisors" WHERE rating > 4 ORDER BY createdAt DESC LIMIT 50) AS limited_subset"#,
+        )
+        .unwrap();
+        assert_eq!(q.table, "advisors");
+        assert_eq!(q.limit, Some(50));
+        assert_eq!(q.order_by.len(), 1);
+        assert_eq!(q.order_by[0].field, "createdAt");
+        assert!(q.order_by[0].desc);
+        assert!(q.where_clause.is_some());
+    }
+
+    #[test]
+    fn outer_limit_overrides_inner() {
+        let q = parse(
+            r#"SELECT * FROM (SELECT * FROM "u" LIMIT 10) AS s LIMIT 5"#,
+        )
+        .unwrap();
+        assert_eq!(q.limit, Some(5));
+    }
+
+    #[test]
+    fn parses_column_projection() {
+        let q = parse(r#"SELECT name, email FROM "users""#).unwrap();
+        assert_eq!(q.table, "users");
+        assert_eq!(
+            q.columns,
+            Some(vec!["name".to_string(), "email".to_string()])
+        );
+    }
+
+    #[test]
+    fn star_keeps_columns_none() {
+        let q = parse(r#"SELECT * FROM "users""#).unwrap();
+        assert!(q.columns.is_none());
+    }
+
+    #[test]
+    fn projection_with_where_and_limit() {
+        let q = parse(r#"SELECT id, rating FROM "advisors" WHERE verified = true LIMIT 5"#).unwrap();
+        assert_eq!(
+            q.columns,
+            Some(vec!["id".to_string(), "rating".to_string()])
+        );
+        assert_eq!(q.limit, Some(5));
+        assert!(q.where_clause.is_some());
+    }
+
+    #[test]
+    fn parses_infix_array_contains() {
+        let q = parse(r#"SELECT * FROM "p" WHERE tags ARRAY_CONTAINS 'urgent'"#).unwrap();
+        match first_compare(&q) {
+            FilterExpr::ArrayContains { field, value } => {
+                assert_eq!(field, &vec!["tags".to_string()]);
+                assert_eq!(value, &Literal::Str("urgent".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_infix_array_contains_any() {
+        let q =
+            parse(r#"SELECT * FROM "p" WHERE tags ARRAY_CONTAINS_ANY ('p0', 'p1')"#).unwrap();
+        match first_compare(&q) {
+            FilterExpr::ArrayContainsAny { field, values } => {
+                assert_eq!(field, &vec!["tags".to_string()]);
+                assert_eq!(values.len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn subquery_without_alias() {
+        let q = parse(r#"SELECT * FROM (SELECT * FROM "u" LIMIT 7)"#).unwrap();
+        assert_eq!(q.table, "u");
+        assert_eq!(q.limit, Some(7));
     }
 }
