@@ -1,7 +1,8 @@
 //! FirestoreError → JSON-RPC error mapping.
 //!
-//! Phase 1 surfaces missing-index URLs verbatim. Phase 2 will expand this with
-//! IAM hints, quota backoff, and retry guidance.
+//! Surfaces missing-index URLs verbatim plus structured hints for IAM /
+//! quota / deadline / unavailable so the user gets actionable guidance, not
+//! just a stack-trace string.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -105,8 +106,10 @@ pub fn map_error(err: &firestore::errors::FirestoreError) -> (i64, String, Optio
 }
 
 fn classify(raw: &str) -> ErrorKind {
-    // Phase 1 uses substring matching on the gRPC status name. firestore-rs surfaces
-    // these tokens in the Display output of `FirestoreError::DatabaseError` variants.
+    // Substring matching on the gRPC status name — firestore-rs surfaces these
+    // tokens in the Display output of `FirestoreError::DatabaseError` variants.
+    // Brittle by design: when the upstream library exposes a typed status code,
+    // switch to that and delete this function.
     if raw.contains("FAILED_PRECONDITION") {
         ErrorKind::FailedPrecondition
     } else if raw.contains("UNAUTHENTICATED") {

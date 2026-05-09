@@ -1,17 +1,29 @@
 //! JSON-RPC dispatch and response helpers.
+//!
+//! Requests with no `id` field are JSON-RPC 2.0 notifications — they expect no
+//! reply. `handle_line` returns `None` in that case; the dispatch loop in
+//! `main.rs` decides whether to write to stdout.
 
 use serde_json::{json, Value};
 
 use crate::handlers;
 
-pub async fn handle_line(line: &str) -> Value {
+pub async fn handle_line(line: &str) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(err) => {
-            return error_response(Value::Null, -32700, &format!("parse error: {err}"), None)
+            return Some(error_response(
+                Value::Null,
+                -32700,
+                &format!("parse error: {err}"),
+                None,
+            ))
         }
     };
 
+    // Distinguish "id missing" (notification — no reply) from "id is null"
+    // (legitimate request id).
+    let is_notification = !request.is_object() || request.get("id").is_none();
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request
         .get("method")
@@ -20,7 +32,7 @@ pub async fn handle_line(line: &str) -> Value {
         .to_string();
     let params = request.get("params").cloned().unwrap_or(Value::Null);
 
-    match method.as_str() {
+    let response = match method.as_str() {
         "initialize" => handlers::query::initialize(id, &params).await,
         "ping" => handlers::query::ping(id, &params).await,
         "test_connection" => handlers::query::test_connection(id, &params).await,
@@ -59,6 +71,12 @@ pub async fn handle_line(line: &str) -> Value {
         "drop_foreign_key" => handlers::ddl::drop_foreign_key(id, &params),
 
         other => not_implemented(id, other),
+    };
+
+    if is_notification {
+        None
+    } else {
+        Some(response)
     }
 }
 

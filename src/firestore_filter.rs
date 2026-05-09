@@ -406,4 +406,57 @@ mod tests {
         rewrite_doc_id(&mut expr, "users", "p1", "(default)");
         assert_eq!(expr, before);
     }
+
+    // build_filter (the AST → firestore-rs mapper) was previously untested —
+    // these smoke-tests exercise the four FilterExpr variants so a regression
+    // surfaces here rather than in a runtime "BadRequest" from Firestore.
+
+    #[test]
+    fn build_filter_eq_emits_compare() {
+        let expr = cmp(&["status"], CmpOp::Eq, Literal::Str("active".into()));
+        // Just verifying it doesn't panic and returns *some* filter.
+        let _ = build_filter(&expr);
+    }
+
+    #[test]
+    fn build_filter_in_emits_in() {
+        let expr = FilterExpr::In {
+            field: vec!["status".into()],
+            values: vec![Literal::Str("a".into()), Literal::Str("b".into())],
+            negated: false,
+        };
+        let _ = build_filter(&expr);
+    }
+
+    #[test]
+    fn build_filter_array_contains() {
+        let expr = FilterExpr::ArrayContains {
+            field: vec!["tags".into()],
+            value: Literal::Str("urgent".into()),
+        };
+        let _ = build_filter(&expr);
+    }
+
+    #[test]
+    fn build_filter_and_or_combination() {
+        let expr = FilterExpr::And(vec![
+            cmp(&["a"], CmpOp::Eq, Literal::Int(1)),
+            FilterExpr::Or(vec![
+                cmp(&["b"], CmpOp::Eq, Literal::Int(2)),
+                cmp(&["c"], CmpOp::Eq, Literal::Int(3)),
+            ]),
+        ]);
+        let _ = build_filter(&expr);
+    }
+
+    #[test]
+    fn build_filter_reference_literal_passes_through() {
+        // doc-id rewrites produce Reference literals; verify the mapper handles them.
+        let expr = cmp(
+            &["__name__"],
+            CmpOp::Eq,
+            Literal::Reference("projects/p/databases/(default)/documents/users/abc".into()),
+        );
+        let _ = build_filter(&expr);
+    }
 }

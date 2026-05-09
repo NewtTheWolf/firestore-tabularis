@@ -1,14 +1,9 @@
-//! Bounded cache with TTL eviction.
-//!
-//! Used for CURSOR_CACHE and COUNT_CACHE in `state.rs`. We hand-roll this rather
-//! than pulling the `lru` crate — ~80 lines of code, zero dependencies, and the
-//! contract is narrow enough that maintenance is trivial.
+//! Bounded cache with TTL eviction. Used for COUNT_CACHE and CURSOR_CACHE.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-#[allow(dead_code)]
 pub struct TtlLruCache<K: Hash + Eq + Clone, V> {
     capacity: usize,
     ttl: Duration,
@@ -17,13 +12,11 @@ pub struct TtlLruCache<K: Hash + Eq + Clone, V> {
     order: std::collections::VecDeque<K>,
 }
 
-#[allow(dead_code)]
 struct Entry<V> {
     value: V,
     inserted_at: Instant,
 }
 
-#[allow(dead_code)]
 impl<K: Hash + Eq + Clone, V> TtlLruCache<K, V> {
     pub fn new(capacity: usize, ttl: Duration) -> Self {
         Self {
@@ -35,15 +28,15 @@ impl<K: Hash + Eq + Clone, V> TtlLruCache<K, V> {
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
-        // Check TTL first without holding a reference.
-        if let Some(entry) = self.entries.get(key) {
-            if entry.inserted_at.elapsed() > self.ttl {
-                self.entries.remove(key);
-                self.order.retain(|k| k != key);
-                return None;
-            }
+        // Single lookup branch: if expired, evict and report miss; else borrow
+        // the value directly. The previous double-`get` was a defensive
+        // workaround for a borrow-checker problem that doesn't exist here.
+        let expired = matches!(self.entries.get(key), Some(e) if e.inserted_at.elapsed() > self.ttl);
+        if expired {
+            self.entries.remove(key);
+            self.order.retain(|k| k != key);
+            return None;
         }
-        // Now get the value (TTL is guaranteed to be valid).
         self.entries.get(key).map(|entry| &entry.value)
     }
 
@@ -77,15 +70,18 @@ impl<K: Hash + Eq + Clone, V> TtlLruCache<K, V> {
         );
     }
 
+    #[cfg(test)]
     pub fn remove(&mut self, key: &K) {
         self.entries.remove(key);
         self.order.retain(|k| k != key);
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();

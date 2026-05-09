@@ -27,7 +27,10 @@ async fn main() {
             continue;
         }
 
-        let response = rpc::handle_line(trimmed).await;
+        let Some(response) = rpc::handle_line(trimmed).await else {
+            // JSON-RPC notification — no reply expected.
+            continue;
+        };
         let mut body = match serde_json::to_string(&response) {
             Ok(s) => s,
             Err(err) => format!(

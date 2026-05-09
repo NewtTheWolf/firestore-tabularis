@@ -352,6 +352,24 @@ mod tests {
         let f = cols.iter().find(|c| c.name == "author").unwrap();
         assert_eq!(f.references, None);
     }
+
+    #[test]
+    fn document_field_named_id_does_not_duplicate_synthetic_column() {
+        // A document that legitimately stores a field called "id" (e.g. a
+        // legacy import) must not produce two `id` columns. The synthetic
+        // doc-ID column wins; the field-level `id` is dropped during inference.
+        let sample = vec![doc(&[("id", FieldType::String), ("name", FieldType::String)])];
+        let cols = infer(&sample, &[]);
+        assert_eq!(
+            cols.iter().filter(|c| c.name == ID_COLUMN).count(),
+            1,
+            "synthetic id column collapsed with field-level id"
+        );
+        let id_col = cols.iter().find(|c| c.name == ID_COLUMN).unwrap();
+        // Synthetic id column has the doc-ID comment; field-level id wouldn't.
+        let json = id_col.to_json();
+        assert_eq!(json["is_pk"], serde_json::Value::Bool(true));
+    }
 }
 
 #[cfg(test)]

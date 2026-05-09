@@ -17,7 +17,7 @@ pub fn get_schemas(id: Value, _params: &Value) -> Value {
 }
 
 pub async fn get_tables(id: Value, _params: &Value) -> Value {
-    let db = match resolve_client(id.clone()).await {
+    let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
@@ -46,21 +46,6 @@ pub async fn get_tables(id: Value, _params: &Value) -> Value {
     ok_response(id, json!(tables))
 }
 
-async fn resolve_client(id: Value) -> Result<&'static firestore::FirestoreDb, Value> {
-    let Some(settings) = crate::state::settings() else {
-        return Err(crate::rpc::error_response(
-            id,
-            -32602,
-            "plugin not initialised",
-            None,
-        ));
-    };
-    crate::state::CLIENT
-        .get_or_try_init(|| async { crate::client::build(settings).await })
-        .await
-        .map_err(|err| crate::rpc::error_response(id.clone(), err.code, &err.message, None))
-}
-
 fn error_from(id: Value, err: &firestore::errors::FirestoreError) -> Value {
     let (code, msg, data) = crate::firestore_error::map_error(err);
     crate::rpc::error_response(id, code, &msg, data)
@@ -76,12 +61,12 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
         return crate::rpc::error_response(id, -32602, "missing 'table' parameter", None);
     }
 
-    if let Some(cached) = crate::state::SCHEMA_CACHE.read().unwrap().get(&table) {
+    if let Some(cached) = crate::state::schema_cache_read().get(&table) {
         let cols: Vec<Value> = cached.iter().map(|c| c.to_json()).collect();
         return ok_response(id, json!(cols));
     }
 
-    let db = match resolve_client(id.clone()).await {
+    let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
@@ -111,10 +96,7 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
         .collect();
 
     let columns = crate::schema_infer::infer(&sample, &refs);
-    crate::state::SCHEMA_CACHE
-        .write()
-        .unwrap()
-        .insert(table, columns.clone());
+    crate::state::schema_cache_write().insert(table, columns.clone());
 
     let json_cols: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
     ok_response(id, json!(json_cols))
@@ -146,7 +128,7 @@ pub fn get_routine_definition(id: Value, _params: &Value) -> Value {
 }
 
 pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
-    let db = match resolve_client(id.clone()).await {
+    let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
@@ -172,8 +154,11 @@ pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
         .map(|s| s.sample_size)
         .unwrap_or(50);
 
-    // Parallel fetch for every collection.
-    let fetches = table_names.iter().cloned().map(|table| {
+    // Parallel fetch for every collection, throttled to 8 concurrent gRPC
+    // calls. Unbounded fan-out on a project with hundreds of collections
+    // would exhaust the shared channel and trip the Firestore quota limiter.
+    use futures::stream::StreamExt;
+    let fetches = futures::stream::iter(table_names.iter().cloned().map(|table| {
         let db = db.clone();
         async move {
             let docs: Vec<firestore::FirestoreDocument> = db
@@ -195,9 +180,18 @@ pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
             let columns = crate::schema_infer::infer(&types, &refs);
             (table, columns)
         }
-    });
-    let fetched: Vec<(String, Vec<crate::schema_infer::ColumnInfo>)> =
-        futures::future::join_all(fetches).await;
+    }))
+    .buffer_unordered(8);
+    let fetched: Vec<(String, Vec<crate::schema_infer::ColumnInfo>)> = fetches.collect().await;
+
+    // Snapshot results are valuable for subsequent get_columns calls — fill
+    // the cache so we don't re-infer the same schema right after.
+    {
+        let mut cache = crate::state::schema_cache_write();
+        for (table, columns) in &fetched {
+            cache.insert(table.clone(), columns.clone());
+        }
+    }
 
     // Assemble the response envelope.
     let mut tables_json: Vec<Value> = Vec::new();
@@ -260,7 +254,7 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
     let mut result: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut to_fetch: Vec<String> = Vec::new();
     {
-        let cache = crate::state::SCHEMA_CACHE.read().unwrap();
+        let cache = crate::state::schema_cache_read();
         for table in &tables {
             if let Some(cols) = cache.get(table) {
                 let json_cols: Vec<Value> = cols.iter().map(|c| c.to_json()).collect();
@@ -272,7 +266,7 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
     }
 
     if !to_fetch.is_empty() {
-        let db = match resolve_client(id.clone()).await {
+        let db = match crate::client::resolve(id.clone()).await {
             Ok(db) => db,
             Err(resp) => return resp,
         };
@@ -280,7 +274,8 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
             .map(|s| s.sample_size)
             .unwrap_or(50);
 
-        let fetches = to_fetch.into_iter().map(|table| async move {
+        use futures::stream::StreamExt;
+        let fetches = futures::stream::iter(to_fetch.into_iter().map(|table| async move {
             let docs: Vec<firestore::FirestoreDocument> = db
                 .fluent()
                 .select()
@@ -298,10 +293,11 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
                 .map(crate::schema_infer::references_from_document)
                 .collect();
             (table, crate::schema_infer::infer(&sample, &refs))
-        });
+        }))
+        .buffer_unordered(8);
 
-        let fetched = futures::future::join_all(fetches).await;
-        let mut cache = crate::state::SCHEMA_CACHE.write().unwrap();
+        let fetched: Vec<_> = fetches.collect().await;
+        let mut cache = crate::state::schema_cache_write();
         for (table, columns) in fetched {
             let json_cols: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
             result.insert(table.clone(), Value::Array(json_cols));
