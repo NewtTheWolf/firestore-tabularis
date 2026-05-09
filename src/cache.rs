@@ -70,10 +70,13 @@ impl<K: Hash + Eq + Clone, V> TtlLruCache<K, V> {
         );
     }
 
-    #[cfg(test)]
     pub fn remove(&mut self, key: &K) {
         self.entries.remove(key);
         self.order.retain(|k| k != key);
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries.keys()
     }
 
     #[cfg(test)]

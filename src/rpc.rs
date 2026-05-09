@@ -58,9 +58,9 @@ pub async fn handle_line(line: &str) -> Option<Value> {
         "execute_query" => handlers::query::execute_query(id, &params).await,
         "explain_query" => handlers::query::explain_query(id, &params).await,
 
-        "insert_record" => handlers::crud::insert_record(id, &params),
-        "update_record" => handlers::crud::update_record(id, &params),
-        "delete_record" => handlers::crud::delete_record(id, &params),
+        "insert_record" => handlers::crud::insert_record(id, &params).await,
+        "update_record" => handlers::crud::update_record(id, &params).await,
+        "delete_record" => handlers::crud::delete_record(id, &params).await,
 
         "get_create_table_sql" => handlers::ddl::get_create_table_sql(id, &params),
         "get_add_column_sql" => handlers::ddl::get_add_column_sql(id, &params),

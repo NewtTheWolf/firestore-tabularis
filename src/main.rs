@@ -4,6 +4,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod cache;
 mod client;
+mod coercion;
 mod error;
 mod firestore_error;
 mod firestore_filter;

@@ -57,6 +57,32 @@ pub fn schema_cache_write() -> RwLockWriteGuard<'static, HashMap<String, Vec<Col
     SCHEMA_CACHE.write().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Drop COUNT_CACHE and CURSOR_CACHE entries that pertain to `table`. Called
+/// after CRUD writes so the next read sees fresh totals and rebuilds cursors.
+/// SCHEMA_CACHE is left alone — schema doesn't change because a row was added.
+pub fn invalidate_table_caches(table: &str) {
+    let mut count = lock_count_cache();
+    let stale: Vec<CountKey> = count
+        .keys()
+        .filter(|k| k.table == table)
+        .cloned()
+        .collect();
+    for k in stale {
+        count.remove(&k);
+    }
+    drop(count);
+
+    let mut cursor = lock_cursor_cache();
+    let stale: Vec<QueryKey> = cursor
+        .keys()
+        .filter(|k| k.table == table)
+        .cloned()
+        .collect();
+    for k in stale {
+        cursor.remove(&k);
+    }
+}
+
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct CountKey {
     pub table: String,

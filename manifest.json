@@ -20,7 +20,7 @@
     "alter_column": false,
     "create_foreign_keys": false,
     "manage_tables": false,
-    "readonly": true
+    "readonly": false
   },
   "settings": [
     { "key": "project_id", "label": "GCP Project ID", "type": "string", "required": true },
