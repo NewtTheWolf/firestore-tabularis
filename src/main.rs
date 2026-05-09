@@ -13,6 +13,7 @@ mod models;
 mod query_parser;
 mod rpc;
 mod schema_infer;
+mod schema_overrides;
 mod state;
 mod utils;
 

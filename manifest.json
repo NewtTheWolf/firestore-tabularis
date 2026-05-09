@@ -29,7 +29,9 @@
       "description": "Optional. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or gcloud ADC." },
     { "key": "emulator_host", "label": "Firestore Emulator Host", "type": "string",
       "description": "Optional. e.g. localhost:8080. Overrides production endpoint." },
-    { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number", "default": 50 }
+    { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number", "default": 50 },
+    { "key": "schema_overrides_dir", "label": "Schema Overrides Directory", "type": "string",
+      "description": "Optional. Directory holding per-(project, database) JSON files with schema overrides (required-ness, type corrections, hidden fields, extra fields). Plugin looks up '{project_id}_{database_id}.json' first, falls back to '{project_id}.json'. See docs/schema-overrides.md. Toggle the connection to reload after edits." }
   ],
   "data_types": [
     { "name": "TEXT",      "category": "string",  "requires_length": false, "requires_precision": false },

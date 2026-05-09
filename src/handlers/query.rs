@@ -7,7 +7,21 @@ use crate::rpc::ok_response;
 pub async fn initialize(id: Value, params: &Value) -> Value {
     let settings_value = params.get("settings").cloned().unwrap_or(Value::Null);
     let settings = crate::models::Settings::from_value(&settings_value);
+
+    // Load optional schema overrides for this (project, database). A bad file
+    // (missing dir, invalid JSON, unknown type override) MUST surface here so
+    // the user sees the failure during connect, not later in get_columns.
+    let overrides = match crate::schema_overrides::load(
+        settings.schema_overrides_dir.as_deref(),
+        &settings.project_id,
+        &settings.database_id,
+    ) {
+        Ok(o) => o,
+        Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
+    };
+
     let _ = crate::state::SETTINGS.set(settings); // second initialize is a no-op
+    let _ = crate::state::SCHEMA_OVERRIDES.set(overrides);
     ok_response(id, Value::Null)
 }
 

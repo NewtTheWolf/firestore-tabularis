@@ -38,6 +38,10 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub is_nullable: bool,
     pub references: Option<String>,
+    /// Free-form description, surfaced by Tabularis in column tooltips.
+    /// Inferred columns leave this `None`; user-supplied schema overrides
+    /// can populate it via `comment` in the override file.
+    pub comment: Option<String>,
 }
 
 /// Name of the synthetic primary-key column we expose for every collection,
@@ -59,7 +63,15 @@ impl ColumnInfo {
             "is_pk": self.name == ID_COLUMN,
             "is_auto_increment": false,
             "character_maximum_length": Value::Null,
-            "comment": if self.name == ID_COLUMN { Value::String("Firestore document ID".into()) } else { Value::Null },
+            "comment": self
+                .comment
+                .clone()
+                .map(Value::String)
+                .unwrap_or_else(|| if self.name == ID_COLUMN {
+                    Value::String("Firestore document ID".into())
+                } else {
+                    Value::Null
+                }),
             "references": self.references.as_ref().map(|s| Value::String(s.clone())).unwrap_or(Value::Null),
         })
     }
@@ -72,6 +84,7 @@ pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec
         data_type: "string".into(),
         is_nullable: false,
         references: None,
+        comment: None,
     }];
 
     // Collect, per field, the set of observed types.
@@ -116,6 +129,7 @@ pub fn infer(sample: &[DocumentTypes], references: &[DocumentReferences]) -> Vec
             data_type,
             is_nullable: true,
             references,
+            comment: None,
         });
     }
 

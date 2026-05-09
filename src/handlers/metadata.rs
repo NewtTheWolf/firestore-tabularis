@@ -95,7 +95,10 @@ pub async fn get_columns(id: Value, params: &Value) -> Value {
         .map(crate::schema_infer::references_from_document)
         .collect();
 
-    let columns = crate::schema_infer::infer(&sample, &refs);
+    let mut columns = crate::schema_infer::infer(&sample, &refs);
+    if let Some(ov) = crate::state::schema_overrides() {
+        crate::schema_overrides::apply(&mut columns, ov, &table);
+    }
     crate::state::schema_cache_write().insert(table, columns.clone());
 
     let json_cols: Vec<Value> = columns.iter().map(|c| c.to_json()).collect();
@@ -177,7 +180,10 @@ pub async fn get_schema_snapshot(id: Value, _params: &Value) -> Value {
                 .iter()
                 .map(crate::schema_infer::references_from_document)
                 .collect();
-            let columns = crate::schema_infer::infer(&types, &refs);
+            let mut columns = crate::schema_infer::infer(&types, &refs);
+            if let Some(ov) = crate::state::schema_overrides() {
+                crate::schema_overrides::apply(&mut columns, ov, &table);
+            }
             (table, columns)
         }
     }))
@@ -292,7 +298,11 @@ pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
                 .iter()
                 .map(crate::schema_infer::references_from_document)
                 .collect();
-            (table, crate::schema_infer::infer(&sample, &refs))
+            let mut columns = crate::schema_infer::infer(&sample, &refs);
+            if let Some(ov) = crate::state::schema_overrides() {
+                crate::schema_overrides::apply(&mut columns, ov, &table);
+            }
+            (table, columns)
         }))
         .buffer_unordered(8);
 

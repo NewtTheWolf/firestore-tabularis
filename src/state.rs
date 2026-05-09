@@ -18,6 +18,8 @@ use crate::models::Settings;
 use crate::schema_infer::ColumnInfo;
 
 pub static SETTINGS: OnceCell<Settings> = OnceCell::new();
+pub static SCHEMA_OVERRIDES: OnceCell<Option<crate::schema_overrides::SchemaOverrides>> =
+    OnceCell::new();
 pub static CLIENT: tokio::sync::OnceCell<firestore::FirestoreDb> =
     tokio::sync::OnceCell::const_new();
 pub static SCHEMA_CACHE: Lazy<RwLock<HashMap<String, Vec<ColumnInfo>>>> =
@@ -103,4 +105,8 @@ pub struct CursorEntry {
 
 pub fn settings() -> Option<&'static Settings> {
     SETTINGS.get()
+}
+
+pub fn schema_overrides() -> Option<&'static crate::schema_overrides::SchemaOverrides> {
+    SCHEMA_OVERRIDES.get().and_then(|o| o.as_ref())
 }

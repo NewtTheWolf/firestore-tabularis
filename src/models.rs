@@ -58,6 +58,13 @@ pub struct Settings {
     pub service_account_path: Option<String>,
     pub emulator_host: Option<String>,
     pub sample_size: u32,
+    /// Optional directory holding per-(project, database) schema-override JSON
+    /// files. Plugin looks up `{project_id}_{database_id}.json` first, then
+    /// `{project_id}.json` as a fallback. This way solo users with one DB
+    /// per project use a flat filename; multi-DB users differentiate without
+    /// having to swap a setting on every reconnect. Loaded once at init;
+    /// toggle the connection to pick up edits.
+    pub schema_overrides_dir: Option<String>,
 }
 
 impl Default for Settings {
@@ -68,6 +75,7 @@ impl Default for Settings {
             service_account_path: None,
             emulator_host: None,
             sample_size: 50,
+            schema_overrides_dir: None,
         }
     }
 }
@@ -102,6 +110,11 @@ impl Settings {
         if let Some(n) = obj.get("sample_size").and_then(Value::as_u64) {
             s.sample_size = n.try_into().unwrap_or(50).max(1);
         }
+        s.schema_overrides_dir = obj
+            .get("schema_overrides_dir")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         s
     }
 }
