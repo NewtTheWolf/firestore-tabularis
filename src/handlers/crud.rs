@@ -27,10 +27,6 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         Ok(db) => db,
         Err(resp) => return resp,
     };
-    let settings = match crate::state::settings() {
-        Some(s) => s,
-        None => return error_response(id, -32602, "plugin not initialised", None),
-    };
 
     // Pull doc-id out of the payload if the user supplied it; the rest of the
     // map becomes the document body. An empty/missing id triggers Firestore's
@@ -73,15 +69,11 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
 
     crate::state::invalidate_table_caches(&table);
 
-    let new_id = created.name.rsplit('/').next().unwrap_or("").to_string();
-    let _ = settings; // suppress unused warning when settings is only validated above
-    ok_response(
-        id,
-        json!({
-            "affected_rows": 1,
-            "id": new_id,
-        }),
-    )
+    // Tabularis' plugin driver expects a bare u64 (affected rows) — the new
+    // doc-id from `created.name` would be useful but isn't part of the
+    // contract; Tabularis re-fetches the table list.
+    let _ = created;
+    ok_response(id, json!(1u64))
 }
 
 pub async fn update_record(id: Value, params: &Value) -> Value {
@@ -89,14 +81,14 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
         return error_response(id, -32602, "missing 'table' parameter", None);
     };
     let table = table.to_string();
-    let Some(pk_val) = params.get("pkVal").and_then(value_to_string) else {
-        return error_response(id, -32602, "missing 'pkVal' parameter", None);
+    let Some(pk_val) = params.get("pk_val").and_then(value_to_string) else {
+        return error_response(id, -32602, "missing 'pk_val' parameter", None);
     };
-    let Some(col_name) = params.get("colName").and_then(Value::as_str) else {
-        return error_response(id, -32602, "missing 'colName' parameter", None);
+    let Some(col_name) = params.get("col_name").and_then(Value::as_str) else {
+        return error_response(id, -32602, "missing 'col_name' parameter", None);
     };
     let col_name = col_name.to_string();
-    let new_val = params.get("newVal").cloned().unwrap_or(Value::Null);
+    let new_val = params.get("new_val").cloned().unwrap_or(Value::Null);
 
     if col_name == crate::schema_infer::ID_COLUMN {
         return error_response(
@@ -147,7 +139,7 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
     }
 
     crate::state::invalidate_table_caches(&table);
-    ok_response(id, json!({ "affected_rows": 1 }))
+    ok_response(id, json!(1u64))
 }
 
 pub async fn delete_record(id: Value, params: &Value) -> Value {
@@ -155,8 +147,8 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         return error_response(id, -32602, "missing 'table' parameter", None);
     };
     let table = table.to_string();
-    let Some(pk_val) = params.get("pkVal").and_then(value_to_string) else {
-        return error_response(id, -32602, "missing 'pkVal' parameter", None);
+    let Some(pk_val) = params.get("pk_val").and_then(value_to_string) else {
+        return error_response(id, -32602, "missing 'pk_val' parameter", None);
     };
 
     let db = match crate::client::resolve(id.clone()).await {
@@ -173,7 +165,7 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
     }
 
     crate::state::invalidate_table_caches(&table);
-    ok_response(id, json!({ "affected_rows": 1 }))
+    ok_response(id, json!(1u64))
 }
 
 /// Build a Firestore proto-fields map from the JSON edit-cell payload, using
