@@ -23,6 +23,25 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         return error_response(id, -32602, "missing 'data' object", None);
     };
 
+    // Required-field validation. Tabularis' NewRowModal silently drops empty
+    // required fields from the payload (relational drivers rely on the DB
+    // server to fail the insert with NOT NULL — Firestore happily accepts the
+    // partial doc). We catch missing/empty required fields here so the user
+    // sees a clear error instead of a silent success with bad data.
+    if let Some(missing) = find_missing_required_fields(&table, data) {
+        return error_response(
+            id,
+            -32602,
+            &format!(
+                "Required field(s) not set: {}. The plugin's schema declares \
+                 these as is_nullable=false (likely via your schema-overrides \
+                 file). Fill them in or mark the field optional in the override.",
+                missing.join(", ")
+            ),
+            None,
+        );
+    }
+
     let db = match crate::client::resolve(id.clone()).await {
         Ok(db) => db,
         Err(resp) => return resp,
@@ -194,6 +213,40 @@ fn column_hint(table: &str, col_name: &str) -> Option<String> {
         .iter()
         .find(|c| c.name == col_name)
         .map(|c| c.data_type.clone())
+}
+
+/// Validate that every column declared `is_nullable=false` (other than the
+/// synthetic `id`, which Firestore generates if absent) is present and
+/// non-empty in the insert payload. Returns the list of missing field names
+/// when validation fails, or None when everything is fine.
+///
+/// "Empty" means: missing from the map, JSON null, or empty string. Boolean
+/// false, numeric 0, empty array/object are all treated as set — those are
+/// legitimate values for typed columns.
+fn find_missing_required_fields(
+    table: &str,
+    data: &serde_json::Map<String, Value>,
+) -> Option<Vec<String>> {
+    let cache = crate::state::schema_cache_read();
+    let columns = cache.get(table)?.clone();
+    drop(cache);
+
+    let missing: Vec<String> = columns
+        .iter()
+        .filter(|c| !c.is_nullable && c.name != crate::schema_infer::ID_COLUMN)
+        .filter(|c| match data.get(&c.name) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.is_empty(),
+            _ => false,
+        })
+        .map(|c| c.name.clone())
+        .collect();
+
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
 }
 
 /// Coerce a JSON value into the string form Firestore uses for doc IDs.
