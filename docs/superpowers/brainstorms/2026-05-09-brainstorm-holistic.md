@@ -35,6 +35,7 @@
 | | What | Effort | Blocker | Notes |
 |---|---|---|---|---|
 | S1 | Schema-overrides editor UI (instead of editing JSON by hand) | 🔴 | 🟦 (own modal) | Worth its own design. UI extension that opens a per-collection schema editor; writes the override file. |
+| S6 | **Schemaful Mode** — opt-in spectrum from pure Firestore to strict schemaful via definition docs (in-collection or sibling layout), three-layer resolution, optional cascading field-delete | 🔴 | 🟦 | See [`brainstorm-schemaful-mode.md`](./2026-05-09-brainstorm-schemaful-mode.md). Subsumes S1 (the schema editor) plus solves "how do I create a collection from Tabularis". |
 | S2 | Schema-cache TTL + manual "Refresh schema" action | 🟢 | 🟦 | On the stretch list. Today the cache lives for the plugin process; external writes to the field shape stay invisible until restart. |
 | S3 | Confidence indicator per inferred type ("100% string in 50 sampled docs", "mixed: 30% int / 70% string") | 🟢 | 🟦 | Surfaces in column tooltips. Helps user know which fields they should override. |
 | S4 | Inference of map-shape (recursive: nested fields shown as dot-paths) | 🟡 | 🟦 (driver); ⛔ Tabularis would need to render dot-path columns | Currently we collapse maps to one "map" type — losing nested structure. |
