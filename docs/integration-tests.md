@@ -17,24 +17,21 @@ No GCP credentials are needed; the emulator runs locally as a `demo-project`.
 ## Quick start
 
 ```bash
-# One terminal: start the emulator (foreground, Ctrl-C to stop).
-just emulator
-
-# Another terminal: seed + run the integration suite.
-just test-integration
+# Self-contained: random port, fresh firebase.json, seed, run, clean up.
+just emulator test
 ```
 
-The recipe assumes the emulator is reachable on `127.0.0.1:8080` (the default
-`firebase.json`). Override via `FIRESTORE_EMULATOR_HOST=...` if needed.
-
-## CI / one-shot
+For interactive use (e.g. UI testing against a long-running emulator), start
+the emulator in a separate terminal and seed manually:
 
 ```bash
-just ci-integration
+just emulator start    # foreground, Ctrl-C to stop
+just emulator seed     # in another terminal
 ```
 
-Spawns the emulator, waits for it to become ready, seeds, runs the tests, and
-kills the emulator. Self-contained — what GitHub Actions will eventually run.
+The interactive variant uses the port in `firebase.json` (8080 default).
+`just emulator test` ignores that and picks its own random free port so
+multiple runs can coexist.
 
 ## What's covered
 
@@ -49,7 +46,7 @@ kills the emulator. Self-contained — what GitHub Actions will eventually run.
 | Schema-overrides required-field validation blocks insert | `schema_overrides_required_field_blocks_insert` |
 
 All tests are gated `#[ignore]` so `cargo test` (without `--ignored`) skips them
-silently. The `just test-integration` recipe passes `--ignored` to enable.
+silently. The `just emulator test` recipe passes `--ignored` to enable.
 
 ## Files
 
@@ -68,8 +65,8 @@ doc-ids (`crud-test-doc`, `override-test`, etc.) and cleans up after itself,
 but if a test panics mid-run, leftovers may interfere on rerun.
 
 ```bash
-just emulator-reset    # wipes Firestore data without restarting the emulator
-just emulator-seed     # repopulates the fixtures
+just emulator reset    # wipes Firestore data without restarting the emulator
+just emulator seed     # repopulates the fixtures
 ```
 
 ## Why bun + firebase-tools (and not Docker)?

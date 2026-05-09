@@ -34,16 +34,23 @@ Naming convention used in this repo:
 
 ## Common commands
 
-All workflows are wrapped in `justfile`:
+Workflows live in a root `justfile` plus three modules under `just/`. Run `just --list` for the root, `just --list <module>` for a module's recipes.
 
+Root recipes (everyday dev):
 - `just build` — `cargo build` (also builds `ui/` if a `ui/package.json` exists; no-op otherwise)
 - `just release` — release build with LTO + symbol stripping (this is what GitHub Actions ships)
-- `just test` — `cargo test` (unit tests live alongside `utils/identifiers.rs` and `utils/pagination.rs`)
+- `just test` — `cargo test`
+- `just cov` — region-level coverage via `cargo-llvm-cov`
 - `just lint` — `cargo clippy --all-targets -- -D warnings`
 - `just fmt` — `cargo fmt --all`
 - `just repl` — runs the `test_plugin` bin for ad-hoc method probing (caveat below)
-- `just dev-install` — debug build + copy binary and `manifest.json` into the platform's Tabularis plugin folder (`~/.local/share/tabularis/plugins/firestore` on Linux, `~/Library/Application Support/com.debba.tabularis/plugins/firestore` on macOS, `%APPDATA%\com.debba.tabularis\plugins\firestore` on Windows). Restart Tabularis or toggle the plugin in Settings to pick up changes.
-- `just uninstall` — remove the installed plugin folder
+
+Modules:
+- `just plugin install` — debug build + copy binary and `manifest.json` into the platform's Tabularis plugin folder (`~/.local/share/tabularis/plugins/firestore` on Linux, `~/Library/Application Support/com.debba.tabularis/plugins/firestore` on macOS, `%APPDATA%\com.debba.tabularis\plugins\firestore` on Windows). Restart Tabularis or toggle the plugin in Settings to pick up changes.
+- `just plugin uninstall` — remove the installed plugin folder
+- `just emulator start` / `seed` / `reset` — Firestore emulator (bun + firebase-tools, requires Java 21)
+- `just emulator test` — self-contained integration suite: random port, seed, run, clean up
+- `just ui build` — build the React/Vite UI extension if `ui/package.json` exists
 
 Run a single test: `cargo test <test_name>` (e.g. `cargo test escapes_embedded_quotes`).
 
