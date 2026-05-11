@@ -3,7 +3,7 @@
   "id": "firestore",
   "name": "Firestore",
   "version": "0.1.0",
-  "description": "Tabularis driver plugin for Google Firestore",
+  "description": "Google Cloud Firestore driver — Beta. Read-only paths (browse, query subset, ER diagram, EXPLAIN) work; CRUD is not yet wired.",
   "default_port": null,
   "default_username": "",
   "executable": "firestore-plugin",
