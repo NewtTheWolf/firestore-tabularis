@@ -5,9 +5,6 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
   build:
     name: ${{ matrix.platform-label }}
@@ -114,24 +111,17 @@ jobs:
           }
           Compress-Archive -Path "$stage\*" -DestinationPath "firestore-plugin-${{ matrix.platform-label }}.zip"
 
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: firestore-plugin-${{ matrix.platform-label }}.zip
-          prerelease: ${{ contains(github.ref_name, '-') }}
-
-      - name: Stash artifact for Codeberg mirror
+      - name: Stash artifact
         uses: actions/upload-artifact@v4
         with:
           name: firestore-plugin-${{ matrix.platform-label }}
           path: firestore-plugin-${{ matrix.platform-label }}.zip
           retention-days: 1
 
-  codeberg-mirror:
-    name: Mirror release to Codeberg
+  release:
+    name: Publish release on Codeberg
     needs: build
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() }}
     env:
       CODEBERG_OWNER: NewtTheWolf
       CODEBERG_REPO: firestore-tabularis
@@ -150,9 +140,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${TOKEN:-}" ]; then
-            echo "::warning::CODEBERG_TOKEN not set — skipping Codeberg mirror"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::CODEBERG_TOKEN secret is required for releasing to Codeberg"
+            exit 1
           fi
           API="https://codeberg.org/api/v1/repos/${CODEBERG_OWNER}/${CODEBERG_REPO}"
           AUTH="Authorization: token ${TOKEN}"
@@ -166,7 +155,7 @@ jobs:
             case "$TAG" in *-*) is_pre=true ;; esac
             body=$(jq -n --arg tag "$TAG" --argjson pre "$is_pre" '{
               tag_name: $tag, name: $tag,
-              body: "Built from GitHub Actions. See https://github.com/'"${CODEBERG_OWNER}"'/'"${CODEBERG_REPO}"'/releases/tag/\($tag) for full notes.",
+              body: "Automated build from GitHub Actions.",
               draft: false, prerelease: $pre
             }')
             resp=$(curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" -d "$body" "${API}/releases")
@@ -174,10 +163,8 @@ jobs:
             echo "Created release id=$id"
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
-          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Upload assets to Codeberg
-        if: steps.release.outputs.skip != 'true'
         env:
           TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           REL_ID: ${{ steps.release.outputs.id }}
