@@ -118,6 +118,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: firestore-plugin-${{ matrix.platform-label }}.zip
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Stash artifact for Codeberg mirror
         uses: actions/upload-artifact@v4
