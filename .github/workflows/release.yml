@@ -41,7 +41,7 @@ jobs:
             binary-suffix: ".exe"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -60,7 +60,7 @@ jobs:
 
       - name: Setup Node
         if: steps.ui.outputs.present == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
 
@@ -112,7 +112,7 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath "firestore-plugin-${{ matrix.platform-label }}.zip"
 
       - name: Stash artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: firestore-plugin-${{ matrix.platform-label }}
           path: firestore-plugin-${{ matrix.platform-label }}.zip
@@ -127,7 +127,7 @@ jobs:
       CODEBERG_REPO: firestore-tabularis
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
