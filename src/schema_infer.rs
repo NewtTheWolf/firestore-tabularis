@@ -156,8 +156,7 @@ fn classify_set(types: &BTreeSet<FieldType>) -> (String, bool) {
         [FieldType::Bytes] => "binary",
         [FieldType::GeoPoint] => "geopoint",
         [FieldType::Reference] => "reference",
-        [FieldType::Array] => "array",
-        [FieldType::Map] => "map",
+        [FieldType::Array] | [FieldType::Map] => "json",
         _ => "mixed",
     };
 
@@ -322,11 +321,19 @@ mod tests {
     }
 
     #[test]
-    fn nested_map_column_typed_as_map() {
+    fn nested_map_column_typed_as_json() {
         let sample = vec![doc(&[("address", FieldType::Map)])];
         let cols = infer(&sample, &[]);
         let a = cols.iter().find(|c| c.name == "address").unwrap();
-        assert_eq!(a.data_type, "map");
+        assert_eq!(a.data_type, "json");
+    }
+
+    #[test]
+    fn array_column_typed_as_json() {
+        let sample = vec![doc(&[("tags", FieldType::Array)])];
+        let cols = infer(&sample, &[]);
+        let t = cols.iter().find(|c| c.name == "tags").unwrap();
+        assert_eq!(t.data_type, "json");
     }
 
     #[test]
