@@ -118,3 +118,79 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: firestore-plugin-${{ matrix.platform-label }}.zip
+
+      - name: Stash artifact for Codeberg mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: firestore-plugin-${{ matrix.platform-label }}
+          path: firestore-plugin-${{ matrix.platform-label }}.zip
+          retention-days: 1
+
+  codeberg-mirror:
+    name: Mirror release to Codeberg
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() }}
+    env:
+      CODEBERG_OWNER: NewtTheWolf
+      CODEBERG_REPO: firestore-tabularis
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or fetch Codeberg release
+        id: release
+        env:
+          TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::CODEBERG_TOKEN not set — skipping Codeberg mirror"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          API="https://codeberg.org/api/v1/repos/${CODEBERG_OWNER}/${CODEBERG_REPO}"
+          AUTH="Authorization: token ${TOKEN}"
+
+          existing=$(curl -fsS -H "$AUTH" "${API}/releases/tags/${TAG}" 2>/dev/null || echo "")
+          if [ -n "$existing" ]; then
+            id=$(echo "$existing" | jq -r .id)
+            echo "Found existing release id=$id"
+          else
+            is_pre=false
+            case "$TAG" in *-*) is_pre=true ;; esac
+            body=$(jq -n --arg tag "$TAG" --argjson pre "$is_pre" '{
+              tag_name: $tag, name: $tag,
+              body: "Built from GitHub Actions. See https://github.com/'"${CODEBERG_OWNER}"'/'"${CODEBERG_REPO}"'/releases/tag/\($tag) for full notes.",
+              draft: false, prerelease: $pre
+            }')
+            resp=$(curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" -d "$body" "${API}/releases")
+            id=$(echo "$resp" | jq -r .id)
+            echo "Created release id=$id"
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Upload assets to Codeberg
+        if: steps.release.outputs.skip != 'true'
+        env:
+          TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          REL_ID: ${{ steps.release.outputs.id }}
+        run: |
+          set -euo pipefail
+          API="https://codeberg.org/api/v1/repos/${CODEBERG_OWNER}/${CODEBERG_REPO}"
+          AUTH="Authorization: token ${TOKEN}"
+          for f in artifacts/*.zip; do
+            name=$(basename "$f")
+            echo "Uploading $name…"
+            existing=$(curl -fsS -H "$AUTH" "${API}/releases/${REL_ID}/assets" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' || true)
+            if [ -n "$existing" ]; then
+              curl -fsS -X DELETE -H "$AUTH" "${API}/releases/${REL_ID}/assets/${existing}"
+            fi
+            curl -fsS -X POST -H "$AUTH" -F "attachment=@${f}" "${API}/releases/${REL_ID}/assets?name=${name}" > /dev/null
+          done
+          echo "All assets uploaded to Codeberg release."
