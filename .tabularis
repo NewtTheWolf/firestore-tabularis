@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=https://registry.spitzli.dev/manifest.schema.json
+$schema: https://registry.spitzli.dev/manifest.schema.json
+
+id: firestore
+name: Firestore
+version: 0.2.0
+description: >-
+  Google Cloud Firestore driver for Tabularis. Browse collections, infer
+  schemas, run SQL-flavoured queries, view the ER diagram, EXPLAIN plans,
+  and CRUD against any project or the local emulator.
+
+category: database
+tags:
+  - firestore
+  - nosql
+  - google-cloud
+  - gcp
+  - database-driver
+
+license: Apache-2.0
+icon: assets/icon.png
+color: "#FFA000"
+
+homepage: https://codeberg.org/NewtTheWolf/firestore-tabularis
+documentation_url: https://codeberg.org/NewtTheWolf/firestore-tabularis/src/branch/main/README.md
+readme: README.md
+
+support:
+  issues_url: https://codeberg.org/NewtTheWolf/firestore-tabularis/issues
+
+executable: firestore-plugin
+
+capabilities:
+  schemas: false
+  views: false
+  routines: false
+  triggers: false
+  file_based: false
+  folder_based: false
+  no_connection_required: true
+  connection_string: false
+  identifier_quote: "\""
+  alter_primary_key: false
+  alter_column: false
+  create_foreign_keys: false
+  manage_tables: false
+  readonly: false
+
+settings:
+  - key: project_id
+    label: GCP Project ID
+    type: string
+    required: true
+  - key: database_id
+    label: Database ID
+    type: string
+    default: "(default)"
+  - key: service_account_path
+    label: Service Account JSON Path
+    type: path
+    description: >-
+      Optional. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or
+      gcloud Application Default Credentials.
+  - key: emulator_host
+    label: Firestore Emulator Host
+    type: string
+    description: >-
+      Optional. e.g. localhost:8080. Overrides the production endpoint.
+  - key: sample_size
+    label: Schema Inference Sample Size
+    type: number
+    default: 50
+  - key: schema_overrides_dir
+    label: Schema Overrides Directory
+    type: folder
+    description: >-
+      Optional. Per-(project, db) JSON files for required fields, type fixes,
+      and hidden/extra columns. Lookup: '{project_id}_{database_id}.json' →
+      '{project_id}.json'. See docs/schema-overrides.md. Toggle the connection
+      to reload.
+
+data_types:
+  - name: TEXT
+    category: string
+    requires_length: false
+    requires_precision: false
+  - name: INTEGER
+    category: numeric
+    requires_length: false
+    requires_precision: false
+  - name: REAL
+    category: numeric
+    requires_length: false
+    requires_precision: false
+  - name: BOOLEAN
+    category: other
+    requires_length: false
+    requires_precision: false
+  - name: TIMESTAMP
+    category: date
+    requires_length: false
+    requires_precision: false

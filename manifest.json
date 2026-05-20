@@ -1,16 +1,26 @@
 {
-  "$schema": "https://tabularis.dev/schemas/plugin-manifest.json",
+  "$schema": "https://registry.spitzli.dev/manifest.schema.json",
   "id": "firestore",
   "name": "Firestore",
-  "version": "0.1.0",
-  "description": "Google Cloud Firestore driver — Beta. Read-only paths (browse, query subset, ER diagram, EXPLAIN) work; CRUD is not yet wired.",
-  "default_port": null,
-  "default_username": "",
+  "version": "0.2.0",
+  "description": "Google Cloud Firestore driver for Tabularis. Browse collections, infer schemas, run SQL-flavoured queries, view the ER diagram, EXPLAIN plans, and CRUD against any project or the local emulator.",
+  "category": "database",
+  "tags": ["firestore", "nosql", "google-cloud", "gcp", "database-driver"],
+  "license": "Apache-2.0",
+  "icon": "assets/icon.png",
+  "color": "#FFA000",
+  "homepage": "https://codeberg.org/NewtTheWolf/firestore-tabularis",
+  "documentation_url": "https://codeberg.org/NewtTheWolf/firestore-tabularis/src/branch/main/README.md",
+  "readme": "README.md",
+  "support": {
+    "issues_url": "https://codeberg.org/NewtTheWolf/firestore-tabularis/issues"
+  },
   "executable": "firestore-plugin",
   "capabilities": {
     "schemas": false,
     "views": false,
     "routines": false,
+    "triggers": false,
     "file_based": false,
     "folder_based": false,
     "no_connection_required": true,
@@ -25,13 +35,13 @@
   "settings": [
     { "key": "project_id", "label": "GCP Project ID", "type": "string", "required": true },
     { "key": "database_id", "label": "Database ID", "type": "string", "default": "(default)" },
-    { "key": "service_account_path", "label": "Service Account JSON Path", "type": "string",
+    { "key": "service_account_path", "label": "Service Account JSON Path", "type": "path",
       "description": "Optional. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or gcloud ADC." },
     { "key": "emulator_host", "label": "Firestore Emulator Host", "type": "string",
       "description": "Optional. e.g. localhost:8080. Overrides production endpoint." },
     { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number", "default": 50 },
-    { "key": "schema_overrides_dir", "label": "Schema Overrides Directory", "type": "string",
-      "description": "Optional. Directory holding per-(project, database) JSON files with schema overrides (required-ness, type corrections, hidden fields, extra fields). Plugin looks up '{project_id}_{database_id}.json' first, falls back to '{project_id}.json'. See docs/schema-overrides.md. Toggle the connection to reload after edits." }
+    { "key": "schema_overrides_dir", "label": "Schema Overrides Directory", "type": "folder",
+      "description": "Optional. Per-(project, db) JSON files for required fields, type fixes, and hidden/extra columns. Lookup: '{project_id}_{database_id}.json' → '{project_id}.json'. See docs/schema-overrides.md. Toggle the connection to reload." }
   ],
   "data_types": [
     { "name": "TEXT",      "category": "string",  "requires_length": false, "requires_precision": false },
