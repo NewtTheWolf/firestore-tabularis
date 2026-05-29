@@ -1,5 +1,5 @@
 {
-  "$schema": "https://registry.spitzli.dev/manifest.schema.json",
+  "$schema": "https://registry.tabularis.dev/manifest.schema.json",
   "id": "firestore",
   "name": "Firestore",
   "version": "0.2.0",
