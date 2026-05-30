@@ -1,8 +1,9 @@
 {
   "$schema": "https://registry.tabularis.dev/manifest.schema.json",
-  "id": "firestore",
-  "name": "Firestore",
-  "version": "0.2.0",
+  "name": "firestore",
+  "kind": "driver",
+  "engine": "firestore",
+  "paradigms": ["document"],
   "description": "Google Cloud Firestore driver for Tabularis. Browse collections, infer schemas, run SQL-flavoured queries, view the ER diagram, EXPLAIN plans, and CRUD against any project or the local emulator.",
   "category": "database",
   "tags": ["firestore", "nosql", "google-cloud", "gcp", "database-driver"],
@@ -34,14 +35,11 @@
   },
   "settings": [
     { "key": "project_id", "label": "GCP Project ID", "type": "string", "required": true },
-    { "key": "database_id", "label": "Database ID", "type": "string", "default": "(default)" },
-    { "key": "service_account_path", "label": "Service Account JSON Path", "type": "path",
-      "description": "Optional. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or gcloud ADC." },
-    { "key": "emulator_host", "label": "Firestore Emulator Host", "type": "string",
-      "description": "Optional. e.g. localhost:8080. Overrides production endpoint." },
-    { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number", "default": 50 },
-    { "key": "schema_overrides_dir", "label": "Schema Overrides Directory", "type": "folder",
-      "description": "Optional. Per-(project, db) JSON files for required fields, type fixes, and hidden/extra columns. Lookup: '{project_id}_{database_id}.json' → '{project_id}.json'. See docs/schema-overrides.md. Toggle the connection to reload." }
+    { "key": "database_id", "label": "Database ID", "type": "string", "description": "Defaults to (default) when empty." },
+    { "key": "service_account_path", "label": "Service Account JSON Path", "type": "string", "description": "Optional. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or gcloud ADC." },
+    { "key": "emulator_host", "label": "Firestore Emulator Host", "type": "string", "description": "Optional. e.g. localhost:8080. Overrides production endpoint." },
+    { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number", "description": "Documents sampled per collection for schema inference. Defaults to 50 when empty." },
+    { "key": "schema_overrides_dir", "label": "Schema Overrides Directory", "type": "string", "description": "Optional. Per-(project, db) JSON files for required fields, type fixes, and hidden/extra columns. Lookup: '{project_id}_{database_id}.json' → '{project_id}.json'. See docs/schema-overrides.md. Toggle the connection to reload." }
   ],
   "data_types": [
     { "name": "TEXT",      "category": "string",  "requires_length": false, "requires_precision": false },
