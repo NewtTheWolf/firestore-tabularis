@@ -134,6 +134,9 @@ jobs:
       CODEBERG_OWNER: NewtTheWolf
       CODEBERG_REPO: firestore-tabularis
     steps:
+      - name: Checkout (for the .tabularium manifest asset)
+        uses: actions/checkout@v5
+
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
@@ -180,7 +183,10 @@ jobs:
           set -euo pipefail
           API="https://codeberg.org/api/v1/repos/${CODEBERG_OWNER}/${CODEBERG_REPO}"
           AUTH="Authorization: token ${TOKEN}"
-          for f in artifacts/*.zip; do
+          # Per-release assets: the platform binaries plus the manifest
+          # (required by the Tabularium registry since 0.8.0 — it resolves
+          # the plugin manifest from the release assets, not from the git ref).
+          for f in artifacts/*.zip .tabularium; do
             name=$(basename "$f")
             echo "Uploading $name…"
             existing=$(curl -fsS -H "$AUTH" "${API}/releases/${REL_ID}/assets" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' || true)
