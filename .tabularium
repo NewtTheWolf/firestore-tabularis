@@ -8,6 +8,9 @@ description: >-
   CRUD against any project or the local emulator.
 category: integration
 kind: driver
+engine: firestore
+paradigms:
+  - document
 tags:
   - firestore
   - nosql
@@ -31,8 +34,6 @@ min_runtime_version: '0.9.13'
 
 executable: firestore-plugin
 
-default_port: null
-default_username: ""
 is_builtin: false
 
 capabilities:
