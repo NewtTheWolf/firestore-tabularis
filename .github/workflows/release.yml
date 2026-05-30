@@ -162,20 +162,16 @@ jobs:
             id=$(echo "$existing" | jq -r .id)
             echo "Found existing release id=$id"
           else
-            # IMPORTANT: create as draft so Codeberg does NOT fire the release
-            # webhook yet — Tabularium would ingest with an empty assets list
-            # and reject the manifest under strict mode. The final step flips
-            # draft→published once every asset is uploaded.
             is_pre=false
             case "$TAG" in *-*) is_pre=true ;; esac
             body=$(jq -n --arg tag "$TAG" --argjson pre "$is_pre" '{
               tag_name: $tag, name: $tag,
               body: "Automated build from GitHub Actions.",
-              draft: true, prerelease: $pre
+              draft: false, prerelease: $pre
             }')
             resp=$(curl -fsS -X POST -H "$AUTH" -H "Content-Type: application/json" -d "$body" "${API}/releases")
             id=$(echo "$resp" | jq -r .id)
-            echo "Created draft release id=$id"
+            echo "Created release id=$id"
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
@@ -200,19 +196,3 @@ jobs:
             curl -fsS -X POST -H "$AUTH" -F "attachment=@${f}" "${API}/releases/${REL_ID}/assets?name=${name}" > /dev/null
           done
           echo "All assets uploaded to Codeberg release."
-
-      - name: Publish Codeberg release (flip draft → published)
-        env:
-          TOKEN: ${{ secrets.CODEBERG_TOKEN }}
-          REL_ID: ${{ steps.release.outputs.id }}
-        run: |
-          set -euo pipefail
-          API="https://codeberg.org/api/v1/repos/${CODEBERG_OWNER}/${CODEBERG_REPO}"
-          AUTH="Authorization: token ${TOKEN}"
-          # Flipping draft→false fires the Codeberg release webhook with the
-          # assets list already populated, so Tabularium's strict-mode ingest
-          # sees the manifest asset on the first try.
-          curl -fsS -X PATCH -H "$AUTH" -H "Content-Type: application/json" \
-            -d '{"draft": false}' \
-            "${API}/releases/${REL_ID}" > /dev/null
-          echo "Codeberg release published — webhook now fires with assets attached."
