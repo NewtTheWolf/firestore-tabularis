@@ -39,7 +39,7 @@ pub async fn handle_line(line: &str) -> Option<Value> {
 
         "get_databases" => handlers::metadata::get_databases(id, &params).await,
         "list_databases" => handlers::metadata::list_databases(id, &params).await,
-        "get_schemas" => handlers::metadata::get_schemas(id, &params),
+        "get_schemas" => handlers::metadata::get_schemas(id, &params).await,
         "get_tables" => handlers::metadata::get_tables(id, &params).await,
         "get_columns" => handlers::metadata::get_columns(id, &params).await,
         "get_foreign_keys" => handlers::metadata::get_foreign_keys(id, &params),
