@@ -41,6 +41,7 @@ capabilities:
   schemas: false
   views: false
   routines: false
+  triggers: false
   file_based: false
   folder_based: false
   no_connection_required: true

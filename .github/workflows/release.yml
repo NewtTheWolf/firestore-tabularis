@@ -90,7 +90,6 @@ jobs:
           STAGE=staging
           mkdir -p "$STAGE"
           cp target/${{ matrix.target }}/release/firestore-plugin${{ matrix.binary-suffix }} "$STAGE/"
-          cp manifest.json "$STAGE/"
           cp .tabularium "$STAGE/"
           if [ -d assets ]; then
             cp -r assets "$STAGE/"
@@ -108,7 +107,6 @@ jobs:
           $stage = "staging"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\firestore-plugin${{ matrix.binary-suffix }}" $stage
-          Copy-Item "manifest.json" $stage
           Copy-Item ".tabularium" $stage
           if (Test-Path "assets") {
             Copy-Item -Recurse "assets" "$stage\assets"
