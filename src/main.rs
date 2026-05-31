@@ -2,6 +2,7 @@
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod admin;
 mod cache;
 mod client;
 mod coercion;

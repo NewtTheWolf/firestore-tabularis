@@ -1,11 +1,12 @@
 //! Row-level CRUD over the Firestore document store.
 //!
 //! All three handlers share a common shape:
-//! 1. Resolve table + doc-id from params (with structured -32602 errors).
+//! 1. Resolve table + doc-id + schema from params (with structured -32602 errors).
 //! 2. Coerce edit-cell JSON → Firestore proto values via `crate::coercion`,
 //!    using the inferred schema's `data_type` as a hint where available.
-//! 3. Issue the proto-level RPC (create_doc / update_doc / delete_by_id).
-//! 4. Invalidate COUNT_CACHE + CURSOR_CACHE for the touched table.
+//! 3. Issue the proto-level RPC (create_doc / update_doc / delete_by_id)
+//!    against the schema's target database.
+//! 4. Invalidate COUNT_CACHE + CURSOR_CACHE for the (database, table) tuple.
 
 use std::collections::HashMap;
 
@@ -13,6 +14,15 @@ use gcloud_sdk::google::firestore::v1::{Document, Value as ProtoValue};
 use serde_json::{json, Value};
 
 use crate::rpc::{error_response, ok_response};
+use crate::state::SchemaCacheKey;
+
+fn extract_schema(params: &Value) -> Option<String> {
+    params
+        .get("schema")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
 
 pub async fn insert_record(id: Value, params: &Value) -> Value {
     let Some(table) = params.get("table").and_then(Value::as_str) else {
@@ -23,12 +33,10 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         return error_response(id, -32602, "missing 'data' object", None);
     };
 
-    // Required-field validation. Tabularis' NewRowModal silently drops empty
-    // required fields from the payload (relational drivers rely on the DB
-    // server to fail the insert with NOT NULL — Firestore happily accepts the
-    // partial doc). We catch missing/empty required fields here so the user
-    // sees a clear error instead of a silent success with bad data.
-    if let Some(missing) = find_missing_required_fields(&table, data) {
+    let schema = extract_schema(params);
+    let schema_name = crate::state::schema_or_default(schema.as_deref());
+
+    if let Some(missing) = find_missing_required_fields(&schema_name, &table, data) {
         return error_response(
             id,
             -32602,
@@ -42,14 +50,11 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         );
     }
 
-    let db = match crate::client::resolve(id.clone()).await {
+    let db = match crate::client::resolve_for(id.clone(), schema.as_deref()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
 
-    // Pull doc-id out of the payload if the user supplied it; the rest of the
-    // map becomes the document body. An empty/missing id triggers Firestore's
-    // server-side ID generation.
     let explicit_id: Option<String> = data
         .get(crate::schema_infer::ID_COLUMN)
         .and_then(Value::as_str)
@@ -62,10 +67,8 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let proto_fields = build_proto_fields(&table, &body);
+    let proto_fields = build_proto_fields(&schema_name, &table, &body);
 
-    // The doc name for a Create with a known ID; for autogen we leave it empty
-    // and let the server fill it in. firestore-rs takes Option<S> for the id.
     let new_doc = Document {
         name: String::new(),
         fields: proto_fields,
@@ -86,11 +89,8 @@ pub async fn insert_record(id: Value, params: &Value) -> Value {
         }
     };
 
-    crate::state::invalidate_table_caches(&table);
+    crate::state::invalidate_table_caches(&schema_name, &table);
 
-    // Tabularis' plugin driver expects a bare u64 (affected rows) — the new
-    // doc-id from `created.name` would be useful but isn't part of the
-    // contract; Tabularis re-fetches the table list.
     let _ = created;
     ok_response(id, json!(1u64))
 }
@@ -109,7 +109,10 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
     let col_name = col_name.to_string();
     let new_val = params.get("new_val").cloned().unwrap_or(Value::Null);
 
-    let db = match crate::client::resolve(id.clone()).await {
+    let schema = extract_schema(params);
+    let schema_name = crate::state::schema_or_default(schema.as_deref());
+
+    let db = match crate::client::resolve_for(id.clone(), schema.as_deref()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
@@ -119,20 +122,21 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
     };
 
     if col_name == crate::schema_infer::ID_COLUMN {
-        return rename_document(id, db, &table, &pk_val, &new_val).await;
+        return rename_document(id, &db, &schema_name, &table, &pk_val, &new_val).await;
     }
 
-    // Build a single-field document and tell Firestore to update only that field.
     let mut single_field = HashMap::new();
-    let hint = column_hint(&table, &col_name);
+    let hint = column_hint(&schema_name, &table, &col_name);
     single_field.insert(
         col_name.clone(),
         crate::coercion::json_to_proto(&new_val, hint.as_deref()),
     );
 
+    // Document path references the schema's target database, not always the
+    // connection's configured default.
     let doc_path = format!(
         "projects/{}/databases/{}/documents/{}/{}",
-        settings.project_id, settings.database_id, table, pk_val
+        settings.project_id, schema_name, table, pk_val
     );
     let doc = Document {
         name: doc_path,
@@ -151,7 +155,7 @@ pub async fn update_record(id: Value, params: &Value) -> Value {
         return error_response(id, code, &msg, data);
     }
 
-    crate::state::invalidate_table_caches(&table);
+    crate::state::invalidate_table_caches(&schema_name, &table);
     ok_response(id, json!(1u64))
 }
 
@@ -164,7 +168,10 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         return error_response(id, -32602, "missing 'pk_val' parameter", None);
     };
 
-    let db = match crate::client::resolve(id.clone()).await {
+    let schema = extract_schema(params);
+    let schema_name = crate::state::schema_or_default(schema.as_deref());
+
+    let db = match crate::client::resolve_for(id.clone(), schema.as_deref()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
@@ -177,16 +184,21 @@ pub async fn delete_record(id: Value, params: &Value) -> Value {
         return error_response(id, code, &msg, data);
     }
 
-    crate::state::invalidate_table_caches(&table);
+    crate::state::invalidate_table_caches(&schema_name, &table);
     ok_response(id, json!(1u64))
 }
 
 fn build_proto_fields(
+    database_id: &str,
     table: &str,
     body: &HashMap<String, Value>,
 ) -> HashMap<String, ProtoValue> {
+    let key = SchemaCacheKey {
+        database_id: database_id.to_string(),
+        table: table.to_string(),
+    };
     let cache = crate::state::schema_cache_read();
-    let columns = cache.get(table).cloned();
+    let columns = cache.get(&key).cloned();
     drop(cache);
     coerce_body(body, columns.as_deref())
 }
@@ -205,9 +217,13 @@ fn coerce_body(
         .collect()
 }
 
-fn column_hint(table: &str, col_name: &str) -> Option<String> {
+fn column_hint(database_id: &str, table: &str, col_name: &str) -> Option<String> {
+    let key = SchemaCacheKey {
+        database_id: database_id.to_string(),
+        table: table.to_string(),
+    };
     crate::state::schema_cache_read()
-        .get(table)?
+        .get(&key)?
         .iter()
         .find(|c| c.name == col_name)
         .map(|c| c.data_type.clone())
@@ -217,19 +233,16 @@ fn column_hint(table: &str, col_name: &str) -> Option<String> {
 /// expectation is "I edited the id cell, save it." Implement that as a
 /// best-effort read→create-at-new-id→delete-old sequence.
 ///
-/// Caveats (returned to the caller as warnings would be ideal but Tabularis'
-/// update_record contract is `Result<u64, String>` — no warning channel):
+/// Caveats:
 ///   - Non-atomic: if the create succeeds and the delete fails, the user
-///     ends up with a duplicate doc at both ids. Failure is rare (network
-///     blip mid-rename) and the user can clean up manually.
-///   - Subcollections under the source doc are NOT moved — they stay
-///     orphaned under the now-deleted parent path. Phase 4 will surface
-///     this as a UI confirmation when subcollections are detected.
+///     ends up with a duplicate doc at both ids.
+///   - Subcollections under the source doc are NOT moved.
 ///   - Reference fields in OTHER docs pointing at the old id keep pointing
-///     at it — they go stale. No global rewrite (would require a full scan).
+///     at it.
 async fn rename_document(
     id: Value,
     db: &firestore::FirestoreDb,
+    database_id: &str,
     table: &str,
     old_id: &str,
     new_val: &Value,
@@ -248,7 +261,6 @@ async fn rename_document(
     };
 
     if new_id == old_id {
-        // No-op — same id. Idempotent: report success without doing work.
         return ok_response(id, json!(1u64));
     }
 
@@ -302,24 +314,21 @@ async fn rename_document(
         );
     }
 
-    crate::state::invalidate_table_caches(table);
+    crate::state::invalidate_table_caches(database_id, table);
     ok_response(id, json!(1u64))
 }
 
-/// Validate that every column declared `is_nullable=false` (other than the
-/// synthetic `id`, which Firestore generates if absent) is present and
-/// non-empty in the insert payload. Returns the list of missing field names
-/// when validation fails, or None when everything is fine.
-///
-/// "Empty" means: missing from the map, JSON null, or empty string. Boolean
-/// false, numeric 0, empty array/object are all treated as set — those are
-/// legitimate values for typed columns.
 fn find_missing_required_fields(
+    database_id: &str,
     table: &str,
     data: &serde_json::Map<String, Value>,
 ) -> Option<Vec<String>> {
+    let key = SchemaCacheKey {
+        database_id: database_id.to_string(),
+        table: table.to_string(),
+    };
     let cache = crate::state::schema_cache_read();
-    let columns = cache.get(table)?.clone();
+    let columns = cache.get(&key)?.clone();
     drop(cache);
     let missing = required_fields_missing(&columns, data);
     if missing.is_empty() {
@@ -345,9 +354,6 @@ fn required_fields_missing(
         .collect()
 }
 
-/// Coerce a JSON value into the string form Firestore uses for doc IDs.
-/// Accepts strings (most common) and numbers (which Tabularis sometimes sends
-/// when the synthetic `id` column carries a numeric-looking value).
 fn value_to_string(v: &Value) -> Option<String> {
     match v {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -409,8 +415,6 @@ mod tests {
 
     #[test]
     fn required_fields_missing_skips_synthetic_id() {
-        // The id column is non-nullable but auto-generated by Firestore — the
-        // pre-insert check must not flag it.
         let cols = vec![col("id", "string", false)];
         let data = serde_json::Map::new();
         assert!(required_fields_missing(&cols, &data).is_empty());

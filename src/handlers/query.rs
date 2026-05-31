@@ -26,28 +26,26 @@ pub async fn initialize(id: Value, params: &Value) -> Value {
 }
 
 pub async fn ping(id: Value, params: &Value) -> Value {
-    if crate::state::CLIENT.get().is_some() {
-        return ok_response(id, Value::Null);
+    if let Some(settings) = crate::state::settings() {
+        let map = crate::state::CLIENTS.lock().await;
+        if map.contains_key(settings.database_id.as_str()) {
+            return ok_response(id, Value::Null);
+        }
     }
     test_connection(id, params).await
 }
 
 pub async fn test_connection(id: Value, _params: &Value) -> Value {
-    let Some(settings) = crate::state::settings() else {
+    if crate::state::settings().is_none() {
         return crate::rpc::error_response(
             id,
             -32602,
             "plugin not initialised — host should send 'initialize' before 'test_connection'",
             None,
         );
-    };
+    }
 
-    // Preserve PluginError's code through tokio::sync::OnceCell. The closure must
-    // return a single error type; we use PluginError directly (not String) so the
-    // structured code (-32602 invalid_params vs -32603 internal) survives.
-    let result = crate::state::CLIENT
-        .get_or_try_init(|| async { crate::client::build(settings).await })
-        .await;
+    let result = crate::client::resolve_for(id.clone(), None).await;
 
     match result {
         Ok(db) => {
@@ -75,7 +73,7 @@ pub async fn test_connection(id: Value, _params: &Value) -> Value {
                 }
             }
         }
-        Err(err) => crate::rpc::error_response(id, err.code, &err.message, None),
+        Err(resp) => resp,
     }
 }
 
@@ -85,12 +83,18 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
+    let schema_name = crate::state::schema_or_default(schema.as_deref());
     let mut parsed = match crate::query_parser::parse(&sql) {
         Ok(p) => p,
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
 
-    if let Err(resp) = prepare_filter(&mut parsed, &id) {
+    if let Err(resp) = prepare_filter(&mut parsed, &id, &schema_name) {
         return resp;
     }
 
@@ -104,7 +108,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         _ => parsed.offset.unwrap_or(0),
     };
 
-    let db = match crate::client::resolve(id.clone()).await {
+    let db = match crate::client::resolve_for(id.clone(), schema.as_deref()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
@@ -127,6 +131,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     // Build query key for cursor and count caches.
     let query_key = crate::state::QueryKey {
+        database_id: schema_name.clone(),
         table: parsed.table.clone(),
         where_canonical: parsed
             .where_clause
@@ -200,6 +205,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     // Build cache key for count.
     let count_key = crate::state::CountKey {
+        database_id: schema_name.clone(),
         table: parsed.table.clone(),
         where_canonical: parsed
             .where_clause
@@ -301,15 +307,21 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
         }
     };
 
-    let columns = match crate::state::schema_cache_read().get(&parsed.table) {
-        Some(c) => c.clone(),
-        None => {
-            // Infer on the fly (caller will hit the cache next time via get_columns).
-            let sample: Vec<_> = docs
-                .iter()
-                .map(crate::schema_infer::types_from_document)
-                .collect();
-            crate::schema_infer::infer(&sample, &[])
+    let columns = {
+        let key = crate::state::SchemaCacheKey {
+            database_id: schema_name.clone(),
+            table: parsed.table.clone(),
+        };
+        match crate::state::schema_cache_read().get(&key) {
+            Some(c) => c.clone(),
+            None => {
+                // Infer on the fly (caller will hit the cache next time via get_columns).
+                let sample: Vec<_> = docs
+                    .iter()
+                    .map(crate::schema_infer::types_from_document)
+                    .collect();
+                crate::schema_infer::infer(&sample, &[])
+            }
         }
     };
 
@@ -438,9 +450,14 @@ fn error_from_query(id: Value, err: &firestore::errors::FirestoreError) -> Value
 /// Apply the doc-id rewrite + Firestore restriction validation. Returns a
 /// JSON-RPC error response if validation fails. Used by both `execute_query`
 /// and `explain_query` so the same WHERE clause behaviour is enforced in both.
+///
+/// `database_id` controls which database the rewritten document reference
+/// targets — it must match the schema the query is being routed to, not
+/// always the connection's configured `settings.database_id`.
 fn prepare_filter(
     parsed: &mut crate::query_parser::ParsedQuery,
     id: &Value,
+    database_id: &str,
 ) -> Result<(), Value> {
     if let (Some(filter), Some(settings)) = (parsed.where_clause.as_mut(), crate::state::settings())
     {
@@ -448,7 +465,7 @@ fn prepare_filter(
             filter,
             &parsed.table,
             &settings.project_id,
-            &settings.database_id,
+            database_id,
         );
     }
     if let Some(filter) = &parsed.where_clause {
@@ -484,17 +501,23 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
+    let schema_name = crate::state::schema_or_default(schema.as_deref());
     let analyze = params.get("analyze").and_then(Value::as_bool).unwrap_or(false);
     let mut parsed = match crate::query_parser::parse(&sql) {
         Ok(p) => p,
         Err(e) => return crate::rpc::error_response(id, -32602, &e, None),
     };
 
-    if let Err(resp) = prepare_filter(&mut parsed, &id) {
+    if let Err(resp) = prepare_filter(&mut parsed, &id, &schema_name) {
         return resp;
     }
 
-    let db = match crate::client::resolve(id.clone()).await {
+    let db = match crate::client::resolve_for(id.clone(), schema.as_deref()).await {
         Ok(db) => db,
         Err(resp) => return resp,
     };
