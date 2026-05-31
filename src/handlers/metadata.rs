@@ -6,10 +6,20 @@ use serde_json::{json, Value};
 use crate::rpc::ok_response;
 
 pub async fn get_databases(id: Value, _params: &Value) -> Value {
+    list_databases(id, _params).await
+}
+
+/// Same payload as get_databases, exposed under the Tabularis discovery name
+/// so the host can populate the connection-form dropdown without first
+/// initialising the data-plane client.
+pub async fn list_databases(id: Value, _params: &Value) -> Value {
     let Some(settings) = crate::state::settings() else {
         return crate::rpc::error_response(id, -32602, "plugin not initialised", None);
     };
-    ok_response(id, json!([settings.database_id]))
+    match crate::admin::list_databases(settings).await {
+        Ok(ids) => ok_response(id, json!(ids)),
+        Err(err) => crate::rpc::error_response(id, err.code, &err.message, None),
+    }
 }
 
 pub fn get_schemas(id: Value, _params: &Value) -> Value {

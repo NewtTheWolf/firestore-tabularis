@@ -1,7 +1,7 @@
 {
   "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
   "name": "firestore",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "Google Cloud Firestore driver for Tabularis. Browse collections, infer schemas, run SQL-flavoured queries, view the ER diagram, EXPLAIN plans, and CRUD against any project or the local emulator.",
   "category": "integration",
   "kind": "driver",
@@ -37,7 +37,7 @@
   },
   "settings": [
     { "key": "project_id", "label": "GCP Project ID", "type": "string", "required": true },
-    { "key": "database_id", "label": "Database ID", "type": "string", "description": "Firestore database within the project. Defaults to \"(default)\"." },
+    { "key": "database_id", "label": "Database ID", "type": "string", "description": "Firestore database within the project. Defaults to \"(default)\". The plugin exposes the JSON-RPC method `list_databases` so the connection form can populate a dropdown by enumerating databases under the project." },
     { "key": "service_account_path", "label": "Service Account JSON Path", "type": "string", "description": "Filesystem path to the service-account JSON. If empty, falls back to GOOGLE_APPLICATION_CREDENTIALS or gcloud Application Default Credentials." },
     { "key": "emulator_host", "label": "Firestore Emulator Host", "type": "string", "description": "Optional. e.g. localhost:8080. Overrides the production endpoint." },
     { "key": "sample_size", "label": "Schema Inference Sample Size", "type": "number" },
